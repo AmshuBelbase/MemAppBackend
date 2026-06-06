@@ -37,7 +37,8 @@ supabase_client: Client = create_client(supabase_url, supabase_key)
 
 # Initialize the local embedding model (768 dimensions to match your Supabase SQL)
 print("Loading local embedding model... Please wait...")
-embedding_model = SentenceTransformer("all-mpnet-base-v2")
+# embedding_model = SentenceTransformer("all-mpnet-base-v2")
+embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 print("Embedding model loaded successfully.")
 
 
