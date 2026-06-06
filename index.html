@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Voice Memory Tester</title>
+</head>
+<body style="font-family: sans-serif; text-align: center; padding-top: 40px; background-color: #f9f9f9; color: #333;">
+    <h2>Voice Memory Hub</h2>
+    
+    <div style="border: 1px solid #ccc; padding: 20px; max-width: 500px; margin: 0 auto 20px auto; background: white; border-radius: 8px;">
+        <h3>Record a New Memory</h3>
+        <button id="recordBtn" style="padding: 12px 24px; font-size: 14px; cursor: pointer;">Start Recording</button>
+        <p id="status">Idle</p>
+        <div id="result" style="margin-top: 15px; font-weight: bold; font-size: 14px;"></div>
+    </div>
+
+    <div style="border: 1px solid #ccc; padding: 20px; max-width: 500px; margin: 0 auto; background: white; border-radius: 8px;">
+        <h3>Semantic Search</h3>
+        <input type="text" id="searchQuery" placeholder="Ask about past memories..." style="width: 70%; padding: 10px; font-size: 14px; margin-right: 10px;">
+        <button id="searchBtn" style="padding: 10px 20px; font-size: 14px; cursor: pointer;">Search</button>
+        <div id="searchResults" style="margin-top: 20px; text-align: left; padding: 10px;"></div>
+    </div>
+
+    <script>
+        let mediaRecorder;
+        let audioChunks = [];
+        const recordBtn = document.getElementById('recordBtn');
+        const statusText = document.getElementById('status');
+        const resultDiv = document.getElementById('result');
+
+        // Audio Recording Script
+        recordBtn.addEventListener('click', async () => {
+            if (!mediaRecorder || mediaRecorder.state === "inactive") {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                mediaRecorder = new MediaRecorder(stream);
+                audioChunks = [];
+                mediaRecorder.ondataavailable = event => audioChunks.push(event.data);
+                
+                mediaRecorder.onstop = async () => {
+                    statusText.innerText = "Processing & Vectorizing...";
+                    const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                    const formData = new FormData();
+                    formData.append('file', audioBlob, 'web_audio.webm');
+
+                    try {
+                        const response = await fetch('http://127.0.0.1:8000/api/memory', { method: 'POST', body: formData });
+                        const data = await response.json();
+                        resultDiv.innerText = "Saved Text: \"" + data.transcription + "\"";
+                        statusText.innerText = "Stored in Database successfully!";
+                    } catch (err) {
+                        resultDiv.innerText = "Error: " + err;
+                        statusText.innerText = "Failed";
+                    }
+                };
+                mediaRecorder.start();
+                recordBtn.innerText = "Stop Recording";
+                statusText.innerText = "Recording voice note...";
+            } else {
+                mediaRecorder.stop();
+                recordBtn.innerText = "Start Recording";
+            }
+        });
+
+        // Semantic Query Search Script
+        document.getElementById('searchBtn').addEventListener('click', async () => {
+            const query = document.getElementById('searchQuery').value;
+            const resultsDiv = document.getElementById('searchResults');
+            resultsDiv.innerHTML = "Searching vector space...";
+
+            try {
+                const response = await fetch(`http://127.0.0.1:8000/api/search?q=${encodeURIComponent(query)}`);
+                const data = await response.json();
+                
+                if (data.results && data.results.length > 0) {
+                    resultsDiv.innerHTML = "<h4>Top Matches:</h4>" + data.results.map(item => `
+                        <div style="margin-bottom: 15px; padding: 10px; background: #f0f4f8; border-radius: 4px;">
+                            <p style="margin: 0 0 5px 0;"><strong>Memory:</strong> ${item.raw_text}</p>
+                            <small style="color: #666;">Similarity Score: ${(item.similarity * 100).toFixed(1)}%</small>
+                        </div>
+                    `).join('');
+                } else {
+                    resultsDiv.innerHTML = "<p>No matching memories found.</p>";
+                }
+            } catch (err) {
+                resultsDiv.innerHTML = "<p style='color:red;'>Search Error: " + err + "</p>";
+            }
+        });
+    </script>
+</body>
+</html>
