@@ -6,8 +6,9 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from groq import AsyncGroq
 from dotenv import load_dotenv
-from supabase import create_client, Client
-from sentence_transformers import SentenceTransformer 
+from supabase import create_client, Client 
+from google import genai
+from google.genai import types
 import json
 from fastapi import Header
 from datetime import datetime, timedelta, timezone
@@ -30,16 +31,12 @@ app.add_middleware(
 # Initialize API Clients
 groq_client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY"))
 resend.api_key = os.environ.get("RESEND_API_KEY")
+genai_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 supabase_url = os.environ.get("SUPABASE_URL")
 supabase_key = os.environ.get("SUPABASE_KEY")
 supabase_client: Client = create_client(supabase_url, supabase_key)
 
-# Initialize the local embedding model (768 dimensions to match your Supabase SQL)
-print("Loading local embedding model... Please wait...")
-# embedding_model = SentenceTransformer("all-mpnet-base-v2")
-embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-print("Embedding model loaded successfully.")
 
 
 async def extract_reminders(text: str, memory_id: str):
@@ -107,7 +104,20 @@ async def transcribe_and_store_audio(file: UploadFile = File(...)):
 
         # 2. Generate vector embedding locally (768 dimensions)
         # We run this inside the standard runtime; it takes less than a second
-        text_embedding = embedding_model.encode(raw_text).tolist()
+        # text_embedding = embedding_model.encode(raw_text).tolist()
+
+        # Generate vector embedding via the new Gemini SDK
+        embedding_result = genai_client.models.embed_content(
+            model="gemini-embedding-001",
+            contents=raw_text,
+            config=types.EmbedContentConfig(
+                task_type="RETRIEVAL_DOCUMENT",
+                output_dimensionality=768 # Matches your Supabase table perfectly
+            )
+        )
+        
+        # The new SDK returns an object, not a dictionary
+        text_embedding = embedding_result.embeddings[0].values
 
         # 3. Store into Supabase Table
         data = {
@@ -140,7 +150,19 @@ async def search_memories(q: str):
         
     try:
         # 1. Convert the plain-text search query into a vector match string
-        query_vector = embedding_model.encode(q.strip()).tolist()
+        # query_vector = embedding_model.encode(q.strip()).tolist()
+
+        # Convert search query to vector
+        query_result = genai_client.models.embed_content(
+            model="gemini-embedding-001",
+            contents=q.strip(),
+            config=types.EmbedContentConfig(
+                task_type="RETRIEVAL_QUERY",
+                output_dimensionality=768
+            )
+        )
+        
+        query_vector = query_result.embeddings[0].values
         
         # 2. Match the vector against your database using the RPC function we just saved
         response = supabase_client.rpc(
