@@ -82,6 +82,69 @@ async def extract_reminders(text: str, memory_id: str):
         print(f"Extraction skipped or failed: {e}")
         return 0
 
+async def extract_transactions(text: str, memory_id: str):
+    system_prompt = """
+    You are a precise financial extraction AI. Analyze the user's memory for any debts, loans, payments, transactions or shared expenses.
+    Return ONLY a raw JSON array of objects. Do not include markdown formatting or backticks.
+    
+    CRITICAL RULES:
+    1. EXCLUDE SELF-PURCHASES: Ignore money the user spent entirely on themselves. NEVER use "I", "Me", "My", or "You" as a person_name.
+    2. THE MATH RULE: If multiple items are bought, find the exact UNIT PRICE. Multiply that unit price by the quantity given to each person.
+    3. GOODS = MONEY: If the user buys physical items and gives them to someone else, calculate the monetary value of those items. That person now owes the user. If monetary value of the items is not explicitly stated, return that monetary value is missing and skip that transaction. Do not attempt to guess or estimate the value.
+    4. Calculate the total net amount per person mentioned.
+    5. Output ONLY ONE JSON object per person per event. NEVER output duplicate objects. 
+
+    Each object must have exactly these keys in this exact order:
+    - "reasoning": Briefly state who paid and the math, conclude with e.g. "[Name] bought 2 bags * 1300 unit price = 2600 for User -> THEY" OR "User bought 2 bags * 1300 unit price = 2600 for [Name] -> USER". You MUST end this sentence with exactly the ALL-CAPS WORD "USER" or "THEY". Do not use the person's name in this final phrase.
+    - "person_name": The name of the other person involved.
+    - "transaction_type": 
+        - If your reasoning ends with "THEY", output EXACTLY "owed_to_them"
+        - If your reasoning ends with "USER", output EXACTLY "owed_to_me"
+    - "amount": The final calculated numerical amount as a float.
+
+    If no financial transactions are mentioned, return an empty array [].
+    """
+
+    try:
+        completion = await groq_client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text}
+            ],
+            model="llama-3.1-8b-instant",
+            temperature=0, 
+        )
+        
+        response_text = completion.choices[0].message.content.strip()
+        print(f"Ledger Extraction: {response_text}")
+        
+        transactions = json.loads(response_text)
+        
+        # --- DEFENSIVE FILTER: Remove exact duplicates ---
+        seen = set()
+        unique_transactions = []
+        for txn in transactions:
+            # Create a unique fingerprint for each transaction
+            fingerprint = (txn.get("person_name", "").lower(), txn.get("amount"), txn.get("transaction_type"))
+            if fingerprint not in seen:
+                seen.add(fingerprint)
+                unique_transactions.append(txn)
+        # -------------------------------------------------
+
+        for txn in unique_transactions:
+            supabase_client.table("transactions").insert({
+                "memory_id": memory_id,
+                "person_name": txn["person_name"].lower(), # Lowercase for easy searching
+                "amount": float(txn["amount"]),
+                "transaction_type": txn["transaction_type"]
+            }).execute()
+            
+        return len(unique_transactions)
+        
+    except Exception as e:
+        print(f"Transaction extraction failed: {e}")
+        return 0
+
 @app.post("/api/memory")
 async def transcribe_and_store_audio(file: UploadFile = File(...)):
     # Validate allowed formats
@@ -131,6 +194,7 @@ async def transcribe_and_store_audio(file: UploadFile = File(...)):
 
         # Run the LLM extraction in the background
         tasks_found = await extract_reminders(raw_text, memory_id)
+        txns_found = await extract_transactions(raw_text, memory_id)
         
         return {
             "status": "success",
@@ -206,23 +270,6 @@ async def check_and_send_reminders(authorization: str = Header(None)):
         
         if not due_tasks:
             return {"status": "success", "message": "No pending tasks in the upcoming window."}
-            
-        # sent_count = 0
-        # for task in due_tasks:
-        #     # TODO: In Step 4.3, we will swap this print statement with actual 
-        #     # Firebase Push Notification and Resend Email API calls.
-        #     print("\n" + "="*40)
-        #     print(f"🚨 NOTIFICATION TRIGGERED: {task['task_name']}")
-        #     print(f"⏰ DUE: {task['due_datetime']}")
-        #     print("="*40 + "\n")
-            
-        #     # 4. Mark the task as 'sent' so we don't notify you twice
-        #     supabase_client.table("reminders") \
-        #         .update({"status": "sent"}) \
-        #         .eq("id", task["id"]) \
-        #         .execute()
-                
-        #     sent_count += 1
 
         sent_count = 0
         for task in due_tasks:
@@ -265,10 +312,85 @@ async def check_and_send_reminders(authorization: str = Header(None)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Cron Engine Error: {str(e)}")
 
+@app.get("/api/chat")
+async def chat_with_memories(q: str):
+    if not q:
+        raise HTTPException(status_code=400, detail="Query parameter 'q' is required")
 
-# if __name__ == "__main__":
-#     import uvicorn
-#     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    try:
+        # 1. Fetch semantic context (Vector Search)
+        query_result = genai_client.models.embed_content(
+            model="gemini-embedding-001",
+            contents=q.strip(),
+            config=types.EmbedContentConfig(
+                task_type="RETRIEVAL_QUERY",
+                output_dimensionality=768
+            )
+        )
+        query_vector = query_result.embeddings[0].values
+
+        response = supabase_client.rpc(
+            "match_memories",
+            {"query_embedding": query_vector, "match_threshold": 0.2, "match_count": 10}
+        ).execute()
+        
+        context_text = "\n".join([f"Memory: {note['raw_text']}" for note in response.data])
+
+        # 2. Fetch the Hard Ledger (SQL Math)
+        # We grab all transactions to calculate the exact, unarguable balance sheet
+        ledger_response = supabase_client.table("transactions").select("*").execute()
+        balances = {}
+        
+        for txn in ledger_response.data:
+            person = txn["person_name"].capitalize()
+            if person not in balances:
+                balances[person] = 0
+            
+            # The bulletproof math layer
+            if txn["transaction_type"] == "owed_to_me":
+                balances[person] += txn["amount"]
+            else:
+                balances[person] -= txn["amount"]
+                
+        # Format the balances into a strict fact sheet for the LLM
+        ledger_facts = "\n".join([
+            f"Fact: {p} owes you {amt} rs." if amt > 0 else 
+            f"Fact: You owe {p} {abs(amt)} rs." if amt < 0 else 
+            f"Fact: Your balance with {p} is settled (0 rs)."
+            for p, amt in balances.items()
+        ])
+
+        # 3. Prompt the LLM with the injected math
+        system_prompt = f"""
+        You are the reasoning core of MemApp. Answer the user's question simply and conversationally.
+        
+        CRITICAL RULE:
+        If the user asks about money, debts, or balances, you MUST use the "Hard Database Ledger Facts" below as the absolute truth. Do not attempt to recalculate the math yourself from the semantic memories. Just state the math from the Ledger Facts in a friendly way.
+        
+        --- Hard Database Ledger Facts (100% Accurate) ---
+        {ledger_facts if ledger_facts else "No financial transactions recorded yet."}
+        
+        --- Semantic Context (For general questions) ---
+        {context_text if context_text else "No relevant memories found."}
+        """
+
+        completion = await groq_client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": q}
+            ],
+            model="llama-3.1-8b-instant",
+            temperature=0, 
+        )
+        
+        return {
+            "query": q,
+            "answer": completion.choices[0].message.content.strip(),
+            "sources_utilized": len(response.data)
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"RAG Engine Error: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

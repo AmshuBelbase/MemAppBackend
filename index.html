@@ -26,6 +26,9 @@
         const recordBtn = document.getElementById('recordBtn');
         const statusText = document.getElementById('status');
         const resultDiv = document.getElementById('result');
+        // const API_BASE_URL = 'https://memappbackend.onrender.com/api';
+        const API_BASE_URL = 'http://127.0.0.1:8000/api'; // For local testing
+
 
         // Audio Recording Script
         recordBtn.addEventListener('click', async () => {
@@ -42,7 +45,7 @@
                     formData.append('file', audioBlob, 'web_audio.webm');
 
                     try {
-                        const response = await fetch('http://127.0.0.1:8000/api/memory', { method: 'POST', body: formData });
+                        const response = await fetch(`${API_BASE_URL}/memory`, { method: 'POST', body: formData });
                         const data = await response.json();
                         resultDiv.innerText = "Saved Text: \"" + data.transcription + "\"";
                         statusText.innerText = "Stored in Database successfully!";
@@ -67,7 +70,7 @@
             resultsDiv.innerHTML = "Searching vector space...";
 
             try {
-                const response = await fetch(`http://127.0.0.1:8000/api/search?q=${encodeURIComponent(query)}`);
+                const response = await fetch(`${API_BASE_URL}/search?q=${encodeURIComponent(query)}`);
                 const data = await response.json();
                 
                 if (data.results && data.results.length > 0) {
