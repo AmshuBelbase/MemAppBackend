@@ -1,21 +1,26 @@
 <!DOCTYPE html>
 <html>
+
 <head>
     <title>Voice Memory Tester</title>
 </head>
+
 <body style="font-family: sans-serif; text-align: center; padding-top: 40px; background-color: #f9f9f9; color: #333;">
     <h2>Voice Memory Hub</h2>
-    
-    <div style="border: 1px solid #ccc; padding: 20px; max-width: 500px; margin: 0 auto 20px auto; background: white; border-radius: 8px;">
+
+    <div
+        style="border: 1px solid #ccc; padding: 20px; max-width: 500px; margin: 0 auto 20px auto; background: white; border-radius: 8px;">
         <h3>Record a New Memory</h3>
         <button id="recordBtn" style="padding: 12px 24px; font-size: 14px; cursor: pointer;">Start Recording</button>
         <p id="status">Idle</p>
         <div id="result" style="margin-top: 15px; font-weight: bold; font-size: 14px;"></div>
     </div>
 
-    <div style="border: 1px solid #ccc; padding: 20px; max-width: 500px; margin: 0 auto; background: white; border-radius: 8px;">
+    <div
+        style="border: 1px solid #ccc; padding: 20px; max-width: 500px; margin: 0 auto; background: white; border-radius: 8px;">
         <h3>Semantic Search</h3>
-        <input type="text" id="searchQuery" placeholder="Ask about past memories..." style="width: 70%; padding: 10px; font-size: 14px; margin-right: 10px;">
+        <input type="text" id="searchQuery" placeholder="Ask about past memories..."
+            style="width: 70%; padding: 10px; font-size: 14px; margin-right: 10px;">
         <button id="searchBtn" style="padding: 10px 20px; font-size: 14px; cursor: pointer;">Search</button>
         <div id="searchResults" style="margin-top: 20px; text-align: left; padding: 10px;"></div>
     </div>
@@ -26,8 +31,8 @@
         const recordBtn = document.getElementById('recordBtn');
         const statusText = document.getElementById('status');
         const resultDiv = document.getElementById('result');
-        // const API_BASE_URL = 'https://memappbackend.onrender.com/api';
-        const API_BASE_URL = 'http://127.0.0.1:8000/api'; // For local testing
+        const API_BASE_URL = 'https://memappbackend.onrender.com/api';
+        // const API_BASE_URL = 'http://127.0.0.1:8000/api'; // For local testing
 
 
         // Audio Recording Script
@@ -37,7 +42,7 @@
                 mediaRecorder = new MediaRecorder(stream);
                 audioChunks = [];
                 mediaRecorder.ondataavailable = event => audioChunks.push(event.data);
-                
+
                 mediaRecorder.onstop = async () => {
                     statusText.innerText = "Processing & Vectorizing...";
                     const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
@@ -72,7 +77,7 @@
             try {
                 const response = await fetch(`${API_BASE_URL}/search?q=${encodeURIComponent(query)}`);
                 const data = await response.json();
-                
+
                 if (data.results && data.results.length > 0) {
                     resultsDiv.innerHTML = "<h4>Top Matches:</h4>" + data.results.map(item => `
                         <div style="margin-bottom: 15px; padding: 10px; background: #f0f4f8; border-radius: 4px;">
@@ -89,4 +94,5 @@
         });
     </script>
 </body>
+
 </html>

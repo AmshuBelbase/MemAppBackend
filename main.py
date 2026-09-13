@@ -2,7 +2,7 @@
 
 
 import os
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from groq import AsyncGroq
 from dotenv import load_dotenv
@@ -91,6 +91,59 @@ async def extract_reminders(text: str, memory_id: str):
         return 0
 
 
+async def extract_transactions(text: str):
+    system_prompt = """
+    You are a precise financial extraction AI. Analyze the user's text and extract the transaction details.
+    Assume the user speaking is named "Self".
+    Calculate the total amounts if quantities and unit prices are given.
+    
+    Return ONLY a raw JSON ARRAY of objects. Do not include markdown formatting or backticks.
+    Even if there is only one transaction, you MUST return it inside an array [].
+    
+    Each object must have these keys:
+    - "creditor": The person who is owed the money (usually "Self"). Format as Title Case.
+    - "debtor": The person who owes the money. Format as Title Case.
+    - "amount": The total numerical amount calculated. (Float)
+    - "description": A short summary of what it was for.
+    """
+
+    try:
+        completion = await groq_client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text}
+            ],
+            model="openai/gpt-oss-120b",
+            temperature=0, 
+        )
+        
+        response_text = completion.choices[0].message.content.strip()
+        print(f"Finance LLM Raw Output: {response_text}")
+
+        # Sometimes the LLM wraps the response in ```json ... ```
+        if response_text.startswith("```json"):
+            response_text = response_text.replace("```json", "", 1)
+        if response_text.endswith("```"):
+            response_text = response_text.rsplit("```", 1)[0]
+        response_text = response_text.strip()
+
+        raw_transactions = json.loads(response_text)
+        
+        valid_transactions = [
+            t for t in raw_transactions 
+            if t["creditor"].lower() != t["debtor"].lower()
+        ]
+        
+        if valid_transactions:
+            supabase_client.table("transactions").insert(valid_transactions).execute()
+            
+        return len(valid_transactions)
+            
+    except Exception as e:
+        print(f"Transaction extraction failed: {e}")
+        return 0
+
+
 # --- API ENDPOINTS ---
 
 @app.get("/api/memories")
@@ -112,7 +165,7 @@ class TextMemoryRequest(BaseModel):
     text: str
 
 @app.post("/api/memory/text")
-async def store_text_memory(request: TextMemoryRequest):
+async def store_text_memory(request: TextMemoryRequest, background_tasks: BackgroundTasks):
     raw_text = request.text.strip()
     if not raw_text:
         raise HTTPException(status_code=400, detail="Text cannot be empty.")
@@ -139,14 +192,15 @@ async def store_text_memory(request: TextMemoryRequest):
         response = supabase_client.table("memories").insert(data).execute()
         memory_id = response.data[0]["id"]
 
-        # 3. Run the LLM extraction in the background (if you have this function active)
-        tasks_found = await extract_reminders(raw_text, memory_id)
+        # 3. Run the LLM extractors in the background
+        background_tasks.add_task(extract_reminders, raw_text, memory_id)
+        background_tasks.add_task(extract_transactions, raw_text)
         
         return {
             "status": "success",
             "saved_text": raw_text,
             "database_id": memory_id,
-            "tasks_scheduled": tasks_found
+            "message": "Memory saved. Reminders and Transactions are processing in the background."
         }
         
     except Exception as e:
@@ -154,7 +208,7 @@ async def store_text_memory(request: TextMemoryRequest):
 
 # This endpoint handles the entire pipeline: audio transcription, embedding generation, and database storage.
 @app.post("/api/memory")
-async def transcribe_and_store_audio(file: UploadFile = File(...)):
+async def transcribe_and_store_audio(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     # Validate allowed formats
     if not file.filename.endswith(('.wav', '.m4a', '.mp3', '.ogg', '.webm')):
         raise HTTPException(status_code=400, detail="Unsupported audio format.")
@@ -200,14 +254,15 @@ async def transcribe_and_store_audio(file: UploadFile = File(...)):
 
         memory_id = response.data[0]["id"]
 
-        # Run the LLM extraction in the background
-        tasks_found = await extract_reminders(raw_text, memory_id)
+        # Run the LLM extractors in the background
+        background_tasks.add_task(extract_reminders, raw_text, memory_id)
+        background_tasks.add_task(extract_transactions, raw_text)
         
         return {
             "status": "success",
             "transcription": raw_text,
             "database_id": memory_id,
-            "tasks_scheduled": tasks_found
+            "message": "Audio saved. Reminders and Transactions are processing in the background."
         }
         
     except Exception as e:
@@ -383,63 +438,12 @@ async def record_transaction(req: TextRequest):
     Parses unstructured text, calculates totals via LLM reasoning, 
     and saves multiple transactions to the Supabase ledger.
     """
-    system_prompt = """
-    You are a precise financial extraction AI. Analyze the user's text and extract the transaction details.
-    Assume the user speaking is named "Self".
-    Calculate the total amounts if quantities and unit prices are given.
-    
-    Return ONLY a raw JSON ARRAY of objects. Do not include markdown formatting or backticks.
-    Even if there is only one transaction, you MUST return it inside an array [].
-    
-    Each object must have these keys:
-    - "creditor": The person who is owed the money (usually "Self"). Format as Title Case.
-    - "debtor": The person who owes the money. Format as Title Case.
-    - "amount": The total numerical amount calculated. (Float)
-    - "description": A short summary of what it was for.
-    
-    Example input: "I bought 6 bags of 1200 each and gave 2 bags to siddharth and 3 to aarush."
-    Example output: [
-      {"creditor": "Self", "debtor": "Siddharth", "amount": 2400.0, "description": "2 bags at 1200 each"},
-      {"creditor": "Self", "debtor": "Aarush", "amount": 3600.0, "description": "3 bags at 1200 each"}
-    ]
-    """
-
     try:
-        completion = await groq_client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": req.text}
-            ],
-            model="openai/gpt-oss-120b",
-            temperature=0, 
-        )
-        
-        response_text = completion.choices[0].message.content.strip()
-
-        # Parse the response into a list of dictionaries
-        raw_transactions = json.loads(response_text)
-        
-        # Strip out any transactions where the creditor and debtor are the same person
-        valid_transactions = [
-            t for t in raw_transactions 
-            if t["creditor"].lower() != t["debtor"].lower()
-        ]
-        
-        if valid_transactions:
-            db_response = supabase_client.table("transactions").insert(valid_transactions).execute()
-            
-            # Create a nice summary string for the API response
-            messages = [f"{t['debtor']} owes {t['creditor']} {t['amount']} rs" for t in valid_transactions]
-            summary = " | ".join(messages)
-            
-            return {
-                "status": "success",
-                "message": f"Recorded: {summary}",
-                "data": db_response.data
-            }
+        count = await extract_transactions(req.text)
+        if count > 0:
+            return {"status": "success", "message": f"Successfully recorded {count} transactions."}
         else:
             return {"status": "skipped", "message": "No valid external debts detected."}
-            
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to record transaction: {str(e)}")
 
