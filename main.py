@@ -36,6 +36,8 @@ genai_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 supabase_url = os.environ.get("SUPABASE_URL")
 supabase_key = os.environ.get("SUPABASE_KEY")
+supabase_client: Client = create_client(supabase_url, supabase_key)
+
 import firebase_admin
 from firebase_admin import credentials, messaging
 
