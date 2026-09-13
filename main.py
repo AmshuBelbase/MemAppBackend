@@ -668,14 +668,6 @@ async def chat_with_memories(q: str):
 
 # --- DASHBOARD ENDPOINTS ---
 
-@app.get("/api/memories")
-async def get_all_memories():
-    try:
-        response = supabase_client.table("memories").select("*").order("created_at", desc=True).execute()
-        return response.data
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
-
 @app.delete("/api/memory/{memory_id}")
 async def delete_memory(memory_id: str):
     try:
