@@ -50,7 +50,7 @@ async def extract_reminders(text: str, memory_id: str):
     If a task is implied but no specific time is given, schedule it for exactly 15 minutes from the current time as a default.
     Return a strictly valid JSON object with a single key "reminders" containing an array of objects.
     Each object must have exactly two keys: 
-    - "task_name": A short, clear string.
+    - "task_name": A short, clear string. If monetary values are involved, assume 'rs' or 'INR' as default if currency is not mentioned.
     - "due_datetime": A strict UTC ISO 8601 formatted timestamp ending in 'Z' (YYYY-MM-DDTHH:MM:SSZ). Do NOT use local timezone offsets.
     If no events are mentioned, return {{"reminders": []}}.
     """
