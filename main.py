@@ -60,7 +60,7 @@ async def extract_reminders(text: str, memory_id: str):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": text}
             ],
-            model="llama3-8b-8192",
+            model="llama-3.3-70b-versatile",
             temperature=0, 
         )
         
@@ -466,7 +466,7 @@ async def check_balance(q: str):
                 {"role": "system", "content": extraction_prompt},
                 {"role": "user", "content": q}
             ],
-            model="llama-3.1-8b-instant",
+            model="llama-3.3-70b-versatile",
             temperature=0,
         )
         
