@@ -60,13 +60,20 @@ async def extract_reminders(text: str, memory_id: str):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": text}
             ],
-            model="llama-3.1-8b-instant",
+            model="llama3-8b-8192",
             temperature=0, 
         )
         
         response_text = completion.choices[0].message.content.strip()
-        # print(f"LLM Raw Output: {response_text}") # Debug print
+        print(f"LLM Raw Output: {response_text}") # Turned on debug print
         
+        # Sometimes the LLM wraps the response in ```json ... ```
+        if response_text.startswith("```json"):
+            response_text = response_text.replace("```json", "", 1)
+        if response_text.endswith("```"):
+            response_text = response_text.rsplit("```", 1)[0]
+        response_text = response_text.strip()
+            
         # Parse the JSON and save to the new database table
         reminders = json.loads(response_text)
         
@@ -80,7 +87,7 @@ async def extract_reminders(text: str, memory_id: str):
         return len(reminders)
         
     except Exception as e:
-        print(f"Extraction skipped or failed: {e}")
+        print(f"Extraction failed: {e}")
         return 0
 
 
