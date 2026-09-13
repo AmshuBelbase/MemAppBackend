@@ -711,17 +711,22 @@ async def get_all_reminders():
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
 
 class UpdateReminderRequest(BaseModel):
-    status: str
+    status: str | None = None
+    is_completed: bool | None = None
 
 @app.put("/api/reminders/{reminder_id}")
 async def update_reminder_status(reminder_id: str, request: UpdateReminderRequest):
-    if request.status not in ["pending", "completed"]:
-        raise HTTPException(status_code=400, detail="Invalid status. Must be 'pending' or 'completed'.")
+    update_data = {}
+    if request.status is not None:
+        update_data["status"] = request.status
+    if request.is_completed is not None:
+        update_data["is_completed"] = request.is_completed
         
     try:
-        response = supabase_client.table("reminders").update({"status": request.status}).eq("id", reminder_id).execute()
-        if not response.data:
-            raise HTTPException(status_code=404, detail="Reminder not found.")
+        if update_data:
+            response = supabase_client.table("reminders").update(update_data).eq("id", reminder_id).execute()
+            if not response.data:
+                raise HTTPException(status_code=404, detail="Reminder not found.")
         return {"status": "success", "message": "Reminder updated."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
