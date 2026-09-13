@@ -83,69 +83,6 @@ async def extract_reminders(text: str, memory_id: str):
         print(f"Extraction skipped or failed: {e}")
         return 0
 
-
-# --- API ENDPOINTS ---
-
-@app.get("/api/memories")
-async def get_all_memories():
-    try:
-        # Fetch the top 100 recent memories (we exclude the embedding array to save bandwidth)
-        response = supabase_client.table("memories") \
-            .select("id, raw_text") \
-            .order("id", desc=True) \
-            .limit(100) \
-            .execute()
-            
-        return {"status": "success", "results": response.data}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
-
-# Create a data model for the incoming text
-class TextMemoryRequest(BaseModel):
-    text: str
-
-@app.post("/api/memory/text")
-async def store_text_memory(request: TextMemoryRequest):
-    raw_text = request.text.strip()
-    if not raw_text:
-        raise HTTPException(status_code=400, detail="Text cannot be empty.")
-        
-    try:
-        # 1. Generate vector embedding via the Gemini SDK
-        embedding_result = genai_client.models.embed_content(
-            model="gemini-embedding-001",
-            contents=raw_text,
-            config=types.EmbedContentConfig(
-                task_type="RETRIEVAL_DOCUMENT",
-                output_dimensionality=768 
-            )
-        )
-        
-        text_embedding = embedding_result.embeddings[0].values
-
-        # 2. Store into Supabase Table
-        data = {
-            "raw_text": raw_text,
-            "embedding": text_embedding
-        }
-        
-        response = supabase_client.table("memories").insert(data).execute()
-        memory_id = response.data[0]["id"]
-
-        # 3. Run the LLM extraction in the background (if you have this function active)
-        tasks_found = await extract_reminders(raw_text, memory_id)
-        
-        return {
-            "status": "success",
-            "saved_text": raw_text,
-            "database_id": memory_id,
-            "tasks_scheduled": tasks_found
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Server Pipeline Error: {str(e)}")
-
-# This endpoint handles the entire pipeline: audio transcription, embedding generation, and database storage.
 @app.post("/api/memory")
 async def transcribe_and_store_audio(file: UploadFile = File(...)):
     # Validate allowed formats
@@ -206,7 +143,7 @@ async def transcribe_and_store_audio(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server Pipeline Error: {str(e)}")
 
-# This endpoint takes a natural language query, converts it to a vector, and retrieves relevant memories from Supabase.
+
 @app.get("/api/search")
 async def search_memories(q: str):
     if not q.strip():
@@ -246,7 +183,6 @@ async def search_memories(q: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Search Engine Error: {str(e)}")
 
-# This endpoint is designed to be triggered by a secure cron job every hour. It checks for any reminders that are due within the next hour and sends email notifications accordingly.
 @app.post("/api/internal/check-reminders")
 async def check_and_send_reminders(authorization: str = Header(None)):
     # 1. Security Check: Ensure only your authorized cron job can trigger this
@@ -313,57 +249,6 @@ async def check_and_send_reminders(authorization: str = Header(None)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Cron Engine Error: {str(e)}")
 
-# --- EDIT AND DELETE ENDPOINTS ---
-
-@app.delete("/api/memory/{memory_id}")
-async def delete_memory(memory_id: str):
-    try:
-        # Delete the row where the ID matches
-        response = supabase_client.table("memories").delete().eq("id", memory_id).execute()
-        
-        # Supabase returns the deleted rows in response.data. If empty, it didn't exist.
-        if not response.data:
-            raise HTTPException(status_code=404, detail="Memory not found.")
-            
-        return {"status": "success", "message": f"Memory {memory_id} deleted."}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
-
-# Create a data model for the update request
-class UpdateMemoryRequest(BaseModel):
-    text: str
-
-@app.put("/api/memory/{memory_id}")
-async def update_memory(memory_id: str, request: UpdateMemoryRequest):
-    raw_text = request.text.strip()
-    if not raw_text:
-        raise HTTPException(status_code=400, detail="Text cannot be empty.")
-        
-    try:
-        # 1. Generate a NEW vector embedding for the updated text
-        embedding_result = genai_client.models.embed_content(
-            model="gemini-embedding-001",
-            contents=raw_text,
-            config=types.EmbedContentConfig(
-                task_type="RETRIEVAL_DOCUMENT",
-                output_dimensionality=768 
-            )
-        )
-        new_embedding = embedding_result.embeddings[0].values
-
-        # 2. Update the row in Supabase
-        data = {
-            "raw_text": raw_text,
-            "embedding": new_embedding
-        }
-        response = supabase_client.table("memories").update(data).eq("id", memory_id).execute()
-        
-        if not response.data:
-            raise HTTPException(status_code=404, detail="Memory not found.")
-
-        return {"status": "success", "message": "Memory updated successfully."}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
 
 # --- FINANCE MANAGER EXTENSION ---
 
