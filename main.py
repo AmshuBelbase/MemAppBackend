@@ -473,6 +473,26 @@ async def delete_memory(memory_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
 
+class DeleteMemoriesRequest(BaseModel):
+    ids: list[str]
+
+@app.delete("/api/memories")
+async def delete_multiple_memories(request: DeleteMemoriesRequest):
+    try:
+        if not request.ids:
+            return {"status": "success", "message": "No memories provided to delete."}
+            
+        # Delete related extractions for all IDs
+        supabase_client.table("reminders").delete().in_("memory_id", request.ids).execute()
+        supabase_client.table("transactions").delete().in_("memory_id", request.ids).execute()
+        
+        # Delete the memories
+        supabase_client.table("memories").delete().in_("id", request.ids).execute()
+            
+        return {"status": "success", "message": f"Deleted {len(request.ids)} memories."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
+
 # Create a data model for the update request
 class UpdateMemoryRequest(BaseModel):
     text: str
