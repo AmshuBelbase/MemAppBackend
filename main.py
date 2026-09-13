@@ -148,7 +148,7 @@ async def get_all_memories():
     try:
         # Fetch the top 100 recent memories (we exclude the embedding array to save bandwidth)
         response = supabase_client.table("memories") \
-            .select("id, raw_text, created_at, source") \
+            .select("id, raw_text, created_at, source, is_starred") \
             .order("id", desc=True) \
             .limit(100) \
             .execute()
@@ -667,6 +667,48 @@ async def chat_with_memories(q: str):
         raise HTTPException(status_code=500, detail=f"RAG Engine Error: {str(e)}")
 
 # --- DASHBOARD ENDPOINTS ---
+
+@app.get("/api/memories")
+async def get_all_memories():
+    try:
+        response = supabase_client.table("memories").select("*").order("created_at", desc=True).execute()
+        return response.data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
+
+@app.delete("/api/memory/{memory_id}")
+async def delete_memory(memory_id: str):
+    try:
+        response = supabase_client.table("memories").delete().eq("id", memory_id).execute()
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
+
+# Data model for batch deletion
+class DeleteMemoriesRequest(BaseModel):
+    ids: list[str]
+
+@app.delete("/api/memories")
+async def delete_multiple_memories(request: DeleteMemoriesRequest):
+    try:
+        if not request.ids:
+            return {"status": "success"}
+        # Supabase in filter accepts a list of values
+        response = supabase_client.table("memories").delete().in_("id", request.ids).execute()
+        return {"status": "success", "deleted_count": len(response.data) if response.data else 0}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
+
+class StarMemoryRequest(BaseModel):
+    is_starred: bool
+
+@app.put("/api/memory/{memory_id}/star")
+async def toggle_star_memory(memory_id: str, request: StarMemoryRequest):
+    try:
+        response = supabase_client.table("memories").update({"is_starred": request.is_starred}).eq("id", memory_id).execute()
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
 
 @app.get("/api/reminders")
 async def get_all_reminders():
