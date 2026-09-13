@@ -36,9 +36,22 @@ genai_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 supabase_url = os.environ.get("SUPABASE_URL")
 supabase_key = os.environ.get("SUPABASE_KEY")
-supabase_client: Client = create_client(supabase_url, supabase_key)
+import firebase_admin
+from firebase_admin import credentials, messaging
 
-
+# Initialize Firebase Admin
+try:
+    firebase_json_env = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON")
+    if firebase_json_env:
+        # Load from stringified JSON in environment variable (for Render/production)
+        cred_dict = json.loads(firebase_json_env)
+        cred = credentials.Certificate(cred_dict)
+    else:
+        # Fallback to local file
+        cred = credentials.Certificate(os.path.join(os.path.dirname(__file__), 'firebase-adminsdk.json'))
+    firebase_admin.initialize_app(cred)
+except Exception as e:
+    print(f"Warning: Failed to initialize Firebase Admin SDK: {e}")
 
 async def extract_reminders(text: str, memory_id: str):
     # Give the LLM the current date/time context (Nepal Standard Time)
@@ -440,6 +453,22 @@ async def check_and_send_reminders(authorization: str = Header(None)):
             except Exception as email_err:
                 print(f"Failed to send email: {email_err}")
 
+            # Send Push Notification via FCM
+            try:
+                tokens_resp = supabase_client.table("fcm_tokens").select("token").execute()
+                for t in tokens_resp.data:
+                    message = messaging.Message(
+                        notification=messaging.Notification(
+                            title=f"Reminder: {task['task_name']}",
+                            body=f"Due at {readable_time}"
+                        ),
+                        token=t['token']
+                    )
+                    messaging.send(message)
+                    print(f"FCM Push sent to token {t['token'][:10]}...")
+            except Exception as fcm_err:
+                print(f"Failed to send FCM push: {fcm_err}")
+
             # Mark the task as 'sent'
             supabase_client.table("reminders") \
                 .update({"status": "sent"}) \
@@ -805,6 +834,20 @@ async def get_all_transactions():
     try:
         response = supabase_client.table("transactions").select("*").order("created_at", desc=True).execute()
         return response.data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
+
+class FCMTokenRequest(BaseModel):
+    token: str
+
+@app.post("/api/fcm-token")
+async def register_fcm_token(req: FCMTokenRequest):
+    try:
+        # Upsert the token (if it exists, do nothing or update)
+        response = supabase_client.table("fcm_tokens").select("*").eq("token", req.token).execute()
+        if not response.data:
+            supabase_client.table("fcm_tokens").insert({"token": req.token}).execute()
+        return {"status": "success", "message": "FCM token registered"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
 
