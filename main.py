@@ -60,7 +60,7 @@ async def extract_reminders(text: str, memory_id: str):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": text}
             ],
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-120b",
             temperature=0, 
         )
         
@@ -410,7 +410,7 @@ async def record_transaction(req: TextRequest):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": req.text}
             ],
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-120b",
             temperature=0, 
         )
         
@@ -466,7 +466,7 @@ async def check_balance(q: str):
                 {"role": "system", "content": extraction_prompt},
                 {"role": "user", "content": q}
             ],
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-120b",
             temperature=0,
         )
         
@@ -603,7 +603,7 @@ async def chat_with_memories(q: str):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"Question: {q}"}
             ],
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-120b",
             temperature=0, # Highly deterministic and factual output
         )
         
