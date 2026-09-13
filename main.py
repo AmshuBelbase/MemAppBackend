@@ -98,9 +98,9 @@ async def extract_transactions(text: str, memory_id: str = None):
     Each object must have these keys:
     - "creditor": The person who is owed the money (usually "Self"). Format as Title Case.
     - "debtor": The person who owes the money. Format as Title Case.
-    - "amount": The total numerical amount calculated. (Float)
+    - "amount": The numerical amount (float).
     - "currency": Always use 'INR' unless explicitly stated otherwise.
-    - "description": A short summary of what it was for.
+    - "description": A short summary of the transaction (e.g. "Lunch", "Movie tickets", "Pending payment from Aastha"). Preserve the original tense! If it's a future debt (e.g., "receive 500 from X"), do not say "Received". Use "To receive" or preserve the exact intent.
     
     If no transactions are found, return {"transactions": []}.
     """
@@ -148,7 +148,7 @@ async def get_all_memories():
     try:
         # Fetch the top 100 recent memories (we exclude the embedding array to save bandwidth)
         response = supabase_client.table("memories") \
-            .select("id, raw_text") \
+            .select("id, raw_text, created_at, source") \
             .order("id", desc=True) \
             .limit(100) \
             .execute()
@@ -183,7 +183,8 @@ async def store_text_memory(request: TextMemoryRequest, background_tasks: Backgr
         # 2. Store into Supabase Table
         data = {
             "raw_text": raw_text,
-            "embedding": text_embedding
+            "embedding": text_embedding,
+            "source": "text"
         }
         
         response = supabase_client.table("memories").insert(data).execute()
@@ -244,7 +245,8 @@ async def transcribe_and_store_audio(background_tasks: BackgroundTasks, file: Up
         # 3. Store into Supabase Table
         data = {
             "raw_text": raw_text,
-            "embedding": text_embedding
+            "embedding": text_embedding,
+            "source": "audio"
         }
         
         response = supabase_client.table("memories").insert(data).execute()
