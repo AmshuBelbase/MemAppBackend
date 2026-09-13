@@ -55,9 +55,21 @@ try:
 except Exception as e:
     print(f"Warning: Failed to initialize Firebase Admin SDK: {e}")
 
-async def extract_reminders(text: str, memory_id: str):
-    # Give the LLM the current date/time context (Nepal Standard Time)
-    current_time = datetime.now().strftime("%A, %B %d, %Y %I:%M %p")
+async def extract_reminders(text: str, memory_id: str, timezone_offset: str = "+00:00"):
+    # Give the LLM the current date/time context using the user's timezone offset
+    # Timezone offset format expected: "+05:45", "-08:00", etc.
+    
+    # Safely parse the timezone offset
+    try:
+        sign = -1 if timezone_offset.startswith("-") else 1
+        parts = timezone_offset.strip("+-").split(":")
+        hours = int(parts[0])
+        minutes = int(parts[1]) if len(parts) > 1 else 0
+        user_tz = timezone(timedelta(hours=hours * sign, minutes=minutes * sign))
+    except Exception:
+        user_tz = timezone.utc
+
+    current_time = datetime.now(user_tz).strftime("%A, %B %d, %Y %I:%M %p")
     
     system_prompt = f"""
     You are a precise calendar extraction AI. The current date and time is {current_time}.
@@ -206,6 +218,7 @@ async def get_all_memories():
 class TextMemoryRequest(BaseModel):
     text: str
     source: str = "text"
+    timezone_offset: str = "+00:00"
 
 class CategoryRequest(BaseModel):
     name: str
@@ -256,7 +269,7 @@ async def store_text_memory(request: TextMemoryRequest, background_tasks: Backgr
         memory_id = response.data[0]["id"]
 
         # 3. Run the LLM extractors in the background
-        background_tasks.add_task(extract_reminders, raw_text, memory_id)
+        background_tasks.add_task(extract_reminders, raw_text, memory_id, request.timezone_offset)
         background_tasks.add_task(extract_transactions, raw_text, memory_id)
         
         return {
@@ -271,7 +284,11 @@ async def store_text_memory(request: TextMemoryRequest, background_tasks: Backgr
 
 # This endpoint handles just the transcription (allows user to review before saving)
 @app.post("/api/transcribe")
-async def transcribe_audio_only(file: UploadFile = File(...)):
+async def transcribe_audio_only(
+    file: UploadFile = File(...),
+    timezone_offset: str = Form("+00:00"),
+    background_tasks: BackgroundTasks = BackgroundTasks()
+):
     # Validate allowed formats
     if not file.filename.endswith(('.wav', '.m4a', '.mp3', '.ogg', '.webm')):
         raise HTTPException(status_code=400, detail="Unsupported audio format.")
@@ -300,7 +317,11 @@ async def transcribe_audio_only(file: UploadFile = File(...)):
 
 # This endpoint handles the entire pipeline: audio transcription, embedding generation, and database storage.
 @app.post("/api/memory")
-async def transcribe_and_store_audio(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+async def transcribe_and_store_audio(
+    background_tasks: BackgroundTasks, 
+    file: UploadFile = File(...),
+    timezone_offset: str = Form("+00:00")
+):
     # Validate allowed formats
     if not file.filename.endswith(('.wav', '.m4a', '.mp3', '.ogg', '.webm')):
         raise HTTPException(status_code=400, detail="Unsupported audio format.")
@@ -348,7 +369,7 @@ async def transcribe_and_store_audio(background_tasks: BackgroundTasks, file: Up
         memory_id = response.data[0]["id"]
 
         # Run the LLM extractors in the background
-        background_tasks.add_task(extract_reminders, raw_text, memory_id)
+        background_tasks.add_task(extract_reminders, raw_text, memory_id, timezone_offset)
         background_tasks.add_task(extract_transactions, raw_text, memory_id)
         
         return {
@@ -527,6 +548,7 @@ async def delete_multiple_memories(request: DeleteMemoriesRequest):
 # Create a data model for the update request
 class UpdateMemoryRequest(BaseModel):
     text: str
+    timezone_offset: str = "+00:00"
 
 @app.put("/api/memory/{memory_id}")
 async def update_memory(memory_id: str, request: UpdateMemoryRequest, background_tasks: BackgroundTasks):
@@ -562,7 +584,7 @@ async def update_memory(memory_id: str, request: UpdateMemoryRequest, background
         supabase_client.table("transactions").delete().eq("memory_id", memory_id).execute()
         
         # Re-run extractors in background on the fresh text
-        background_tasks.add_task(extract_reminders, raw_text, memory_id)
+        background_tasks.add_task(extract_reminders, raw_text, memory_id, request.timezone_offset)
         background_tasks.add_task(extract_transactions, raw_text, memory_id)
 
         return {"status": "success", "message": "Memory updated and extractions resynced."}
