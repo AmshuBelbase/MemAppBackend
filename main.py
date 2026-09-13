@@ -88,21 +88,35 @@ async def extract_reminders(text: str, memory_id: str):
 
 
 async def extract_transactions(text: str, memory_id: str = None):
-    system_prompt = """
-    You are a precise financial extraction AI. Analyze the user's text and extract the transaction details.
+    # Fetch available categories to pass to the LLM
+    try:
+        cat_res = supabase_client.table("expense_categories").select("name").execute()
+        categories = [c["name"] for c in cat_res.data]
+    except:
+        categories = ["Food & Groceries", "Travel", "Entertainment", "Online Shopping", "Others"]
+
+    system_prompt = f"""
+    You are a precise financial extraction AI. Analyze the user's text and extract the financial details.
+    Classify each item as either an "expense" (personal spending) OR a "split" (shared expense/debt with someone else).
     Assume the user speaking is named "Self".
     Calculate the total amounts if quantities and unit prices are given.
     
     Return a strictly valid JSON object with a single key "transactions" containing an array of objects.
     
     Each object must have these keys:
-    - "creditor": The person who is owed the money (usually "Self"). Format as Title Case.
-    - "debtor": The person who owes the money. Format as Title Case.
+    - "transaction_type": Either "expense" or "split".
     - "amount": The numerical amount (float).
     - "currency": Always use 'INR' unless explicitly stated otherwise.
-    - "description": A short summary of the transaction (e.g. "Lunch", "Movie tickets", "Pending payment from Aastha"). Preserve the original tense! If it's a future debt (e.g., "receive 500 from X"), do not say "Received". Use "To receive" or preserve the exact intent.
+    - "description": A short summary.
     
-    If no transactions are found, return {"transactions": []}.
+    If "transaction_type" is "expense", add:
+    - "category": Choose the best fit from this list: {', '.join(categories)}. If none fit perfectly, use "Others".
+    
+    If "transaction_type" is "split", add:
+    - "creditor": The person who is owed the money (usually "Self"). Format as Title Case.
+    - "debtor": The person who owes the money. Format as Title Case.
+    
+    If no transactions are found, return {{"transactions": []}}.
     """
 
     try:
@@ -119,17 +133,23 @@ async def extract_transactions(text: str, memory_id: str = None):
         response_text = completion.choices[0].message.content.strip()
         print(f"Finance LLM Raw Output: {response_text}")
 
-        # Parse the strict JSON output
         data = json.loads(response_text)
         raw_transactions = data.get("transactions", [])
         
         valid_transactions = []
         for t in raw_transactions:
-            if t.get("creditor", "").lower() != t.get("debtor", "").lower():
-                # Inject the memory_id so we can trace the transaction back to its voice note
-                if memory_id:
-                    t["memory_id"] = memory_id
-                valid_transactions.append(t)
+            ttype = t.get("transaction_type", "split")
+            if ttype == "split":
+                if t.get("creditor", "").lower() == t.get("debtor", "").lower():
+                    continue # invalid split
+                t["category"] = None
+            else:
+                t["creditor"] = None
+                t["debtor"] = None
+            
+            if memory_id:
+                t["memory_id"] = memory_id
+            valid_transactions.append(t)
         
         if valid_transactions:
             supabase_client.table("transactions").insert(valid_transactions).execute()
@@ -161,6 +181,25 @@ async def get_all_memories():
 class TextMemoryRequest(BaseModel):
     text: str
     source: str = "text"
+
+class CategoryRequest(BaseModel):
+    name: str
+
+@app.get("/api/expense_categories")
+async def get_expense_categories():
+    try:
+        response = supabase_client.table("expense_categories").select("*").order("name").execute()
+        return {"status": "success", "categories": response.data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/expense_categories")
+async def add_expense_category(req: CategoryRequest):
+    try:
+        response = supabase_client.table("expense_categories").insert({"name": req.name}).execute()
+        return {"status": "success", "category": response.data[0]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/memory/text")
 async def store_text_memory(request: TextMemoryRequest, background_tasks: BackgroundTasks):
