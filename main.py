@@ -97,20 +97,24 @@ async def extract_transactions(text: str, memory_id: str = None):
 
     system_prompt = f"""
     You are a precise financial extraction AI. Analyze the user's text and extract the financial details.
-    Classify each item as either an "expense" (personal spending) OR a "split" (shared expense/debt with someone else).
+    Classify each item as one of these three types:
+    1. "expense": Personal spending (money leaving your wallet).
+    2. "income": Personal income (e.g., salary, cashback, money entering your wallet).
+    3. "split": Shared expense/debt with someone else.
+    
     Assume the user speaking is named "Self".
     Calculate the total amounts if quantities and unit prices are given.
     
     Return a strictly valid JSON object with a single key "transactions" containing an array of objects.
     
     Each object must have these keys:
-    - "transaction_type": Either "expense" or "split".
-    - "amount": The numerical amount (float).
+    - "transaction_type": "expense", "income", or "split".
+    - "amount": The numerical amount (float). It should always be positive (we determine direction from the type).
     - "currency": Always use 'INR' unless explicitly stated otherwise.
     - "description": A short summary.
     
-    If "transaction_type" is "expense", add:
-    - "category": Choose the best fit from this list: {', '.join(categories)}. If none fit perfectly, use "Others".
+    If "transaction_type" is "expense" or "income", add:
+    - "category": Choose the best fit from this list: {', '.join(categories)}. If none fit perfectly, use "Others" for expenses, or "Income" for income.
     
     If "transaction_type" is "split", add:
     - "creditor": The person who is owed the money (usually "Self"). Format as Title Case.
@@ -144,6 +148,7 @@ async def extract_transactions(text: str, memory_id: str = None):
                     continue # invalid split
                 t["category"] = None
             else:
+                # Both 'expense' and 'income' don't use creditor/debtor
                 t["creditor"] = None
                 t["debtor"] = None
             
