@@ -634,6 +634,40 @@ async def chat_with_memories(q: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"RAG Engine Error: {str(e)}")
 
+# --- DASHBOARD ENDPOINTS ---
+
+@app.get("/api/reminders")
+async def get_all_reminders():
+    try:
+        response = supabase_client.table("reminders").select("*").order("due_datetime", desc=False).execute()
+        return response.data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
+
+class UpdateReminderRequest(BaseModel):
+    status: str
+
+@app.put("/api/reminders/{reminder_id}")
+async def update_reminder_status(reminder_id: str, request: UpdateReminderRequest):
+    if request.status not in ["pending", "completed"]:
+        raise HTTPException(status_code=400, detail="Invalid status. Must be 'pending' or 'completed'.")
+        
+    try:
+        response = supabase_client.table("reminders").update({"status": request.status}).eq("id", reminder_id).execute()
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Reminder not found.")
+        return {"status": "success", "message": "Reminder updated."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
+
+@app.get("/api/transactions")
+async def get_all_transactions():
+    try:
+        response = supabase_client.table("transactions").select("*").order("created_at", desc=True).execute()
+        return response.data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
+
 if __name__ == "__main__":
     import uvicorn
     # Read assigned port from cloud environment variable, fallback to 8000 locally
