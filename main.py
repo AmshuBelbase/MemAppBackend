@@ -47,11 +47,11 @@ async def extract_reminders(text: str, memory_id: str):
     system_prompt = f"""
     You are a precise calendar extraction AI. The current date and time is {current_time}.
     Analyze the user's memory and extract any explicit or implied tasks, meetings, or deadlines.
-    Return ONLY a raw JSON array of objects. Do not include markdown formatting, backticks, or conversational text.
+    Return a strictly valid JSON object with a single key "reminders" containing an array of objects.
     Each object must have exactly two keys: 
     - "task_name": A short, clear string.
-    - "due_datetime": An ISO 8601 formatted timestamp (YYYY-MM-DDTHH:MM:SS+05:45).
-    If no events are mentioned, return an empty array [].
+    - "due_datetime": A strict UTC ISO 8601 formatted timestamp ending in 'Z' (YYYY-MM-DDTHH:MM:SSZ). Do NOT use local timezone offsets.
+    If no events are mentioned, return {{"reminders": []}}.
     """
 
     try:
@@ -62,20 +62,15 @@ async def extract_reminders(text: str, memory_id: str):
             ],
             model="openai/gpt-oss-120b",
             temperature=0, 
+            response_format={"type": "json_object"}
         )
         
         response_text = completion.choices[0].message.content.strip()
-        print(f"LLM Raw Output: {response_text}") # Turned on debug print
-        
-        # Sometimes the LLM wraps the response in ```json ... ```
-        if response_text.startswith("```json"):
-            response_text = response_text.replace("```json", "", 1)
-        if response_text.endswith("```"):
-            response_text = response_text.rsplit("```", 1)[0]
-        response_text = response_text.strip()
+        print(f"LLM Raw Output: {response_text}")
             
-        # Parse the JSON and save to the new database table
-        reminders = json.loads(response_text)
+        # Parse the strict JSON output
+        data = json.loads(response_text)
+        reminders = data.get("reminders", [])
         
         for reminder in reminders:
             supabase_client.table("reminders").insert({
@@ -91,20 +86,22 @@ async def extract_reminders(text: str, memory_id: str):
         return 0
 
 
-async def extract_transactions(text: str):
+async def extract_transactions(text: str, memory_id: str = None):
     system_prompt = """
     You are a precise financial extraction AI. Analyze the user's text and extract the transaction details.
     Assume the user speaking is named "Self".
     Calculate the total amounts if quantities and unit prices are given.
     
-    Return ONLY a raw JSON ARRAY of objects. Do not include markdown formatting or backticks.
-    Even if there is only one transaction, you MUST return it inside an array [].
+    Return a strictly valid JSON object with a single key "transactions" containing an array of objects.
     
     Each object must have these keys:
     - "creditor": The person who is owed the money (usually "Self"). Format as Title Case.
     - "debtor": The person who owes the money. Format as Title Case.
     - "amount": The total numerical amount calculated. (Float)
+    - "currency": Always use 'INR' unless explicitly stated otherwise.
     - "description": A short summary of what it was for.
+    
+    If no transactions are found, return {"transactions": []}.
     """
 
     try:
@@ -115,24 +112,23 @@ async def extract_transactions(text: str):
             ],
             model="openai/gpt-oss-120b",
             temperature=0, 
+            response_format={"type": "json_object"}
         )
         
         response_text = completion.choices[0].message.content.strip()
         print(f"Finance LLM Raw Output: {response_text}")
 
-        # Sometimes the LLM wraps the response in ```json ... ```
-        if response_text.startswith("```json"):
-            response_text = response_text.replace("```json", "", 1)
-        if response_text.endswith("```"):
-            response_text = response_text.rsplit("```", 1)[0]
-        response_text = response_text.strip()
-
-        raw_transactions = json.loads(response_text)
+        # Parse the strict JSON output
+        data = json.loads(response_text)
+        raw_transactions = data.get("transactions", [])
         
-        valid_transactions = [
-            t for t in raw_transactions 
-            if t["creditor"].lower() != t["debtor"].lower()
-        ]
+        valid_transactions = []
+        for t in raw_transactions:
+            if t.get("creditor", "").lower() != t.get("debtor", "").lower():
+                # Inject the memory_id so we can trace the transaction back to its voice note
+                if memory_id:
+                    t["memory_id"] = memory_id
+                valid_transactions.append(t)
         
         if valid_transactions:
             supabase_client.table("transactions").insert(valid_transactions).execute()
@@ -380,6 +376,10 @@ async def check_and_send_reminders(authorization: str = Header(None)):
 @app.delete("/api/memory/{memory_id}")
 async def delete_memory(memory_id: str):
     try:
+        # Delete related extractions to keep ledger clean
+        supabase_client.table("reminders").delete().eq("memory_id", memory_id).execute()
+        supabase_client.table("transactions").delete().eq("memory_id", memory_id).execute()
+        
         # Delete the row where the ID matches
         response = supabase_client.table("memories").delete().eq("id", memory_id).execute()
         
@@ -396,7 +396,7 @@ class UpdateMemoryRequest(BaseModel):
     text: str
 
 @app.put("/api/memory/{memory_id}")
-async def update_memory(memory_id: str, request: UpdateMemoryRequest):
+async def update_memory(memory_id: str, request: UpdateMemoryRequest, background_tasks: BackgroundTasks):
     raw_text = request.text.strip()
     if not raw_text:
         raise HTTPException(status_code=400, detail="Text cannot be empty.")
@@ -423,7 +423,16 @@ async def update_memory(memory_id: str, request: UpdateMemoryRequest):
         if not response.data:
             raise HTTPException(status_code=404, detail="Memory not found.")
 
-        return {"status": "success", "message": "Memory updated successfully."}
+        # 3. Synchronize Extractions
+        # Delete old extractions linked to this memory
+        supabase_client.table("reminders").delete().eq("memory_id", memory_id).execute()
+        supabase_client.table("transactions").delete().eq("memory_id", memory_id).execute()
+        
+        # Re-run extractors in background on the fresh text
+        background_tasks.add_task(extract_reminders, raw_text, memory_id)
+        background_tasks.add_task(extract_transactions, raw_text, memory_id)
+
+        return {"status": "success", "message": "Memory updated and extractions resynced."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
 
@@ -476,24 +485,28 @@ async def check_balance(q: str):
         
         target_person = completion.choices[0].message.content.strip()
         
-        # 2. Let the deterministic Database handle the math
-        # Get what they owe you
-        owed_to_self = supabase_client.table("transactions") \
-            .select("amount") \
-            .eq("creditor", "Self") \
-            .eq("debtor", target_person) \
-            .execute()
-            
-        # Get what you owe them
-        owed_to_target = supabase_client.table("transactions") \
-            .select("amount") \
-            .eq("creditor", target_person) \
-            .eq("debtor", "Self") \
-            .execute()
-            
-        sum_owed_to_self = sum(item['amount'] for item in owed_to_self.data) if owed_to_self.data else 0
-        sum_owed_to_target = sum(item['amount'] for item in owed_to_target.data) if owed_to_target.data else 0
+        # 2. Let the deterministic Database handle the math with Fuzzy Matching
+        all_transactions = supabase_client.table("transactions").select("*").execute()
         
+        target_lower = target_person.lower()
+        
+        sum_owed_to_self = 0
+        sum_owed_to_target = 0
+        
+        if all_transactions.data:
+            for t in all_transactions.data:
+                creditor = t.get("creditor", "").lower()
+                debtor = t.get("debtor", "").lower()
+                amount = float(t.get("amount", 0))
+                
+                # If the target person is the debtor, they owe Self
+                if target_lower in debtor and "self" in creditor:
+                    sum_owed_to_self += amount
+                    
+                # If the target person is the creditor, Self owes them
+                elif target_lower in creditor and "self" in debtor:
+                    sum_owed_to_target += amount
+                    
         net_balance = sum_owed_to_self - sum_owed_to_target
         
         # 3. Formulate the response programmatically for 100% accuracy
