@@ -160,6 +160,7 @@ async def get_all_memories():
 # Create a data model for the incoming text
 class TextMemoryRequest(BaseModel):
     text: str
+    source: str = "text"
 
 @app.post("/api/memory/text")
 async def store_text_memory(request: TextMemoryRequest, background_tasks: BackgroundTasks):
@@ -184,7 +185,7 @@ async def store_text_memory(request: TextMemoryRequest, background_tasks: Backgr
         data = {
             "raw_text": raw_text,
             "embedding": text_embedding,
-            "source": "text"
+            "source": request.source
         }
         
         response = supabase_client.table("memories").insert(data).execute()
@@ -203,6 +204,35 @@ async def store_text_memory(request: TextMemoryRequest, background_tasks: Backgr
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server Pipeline Error: {str(e)}")
+
+# This endpoint handles just the transcription (allows user to review before saving)
+@app.post("/api/transcribe")
+async def transcribe_audio_only(file: UploadFile = File(...)):
+    # Validate allowed formats
+    if not file.filename.endswith(('.wav', '.m4a', '.mp3', '.ogg', '.webm')):
+        raise HTTPException(status_code=400, detail="Unsupported audio format.")
+        
+    try:
+        # Transcribe via Groq Whisper
+        audio_bytes = await file.read()
+        transcription = await groq_client.audio.transcriptions.create(
+            file=(file.filename, audio_bytes),
+            model="whisper-large-v3",
+            response_format="text",
+            language="en"
+        )
+        
+        raw_text = transcription.strip()
+        if not raw_text:
+            return {"status": "skipped", "message": "No speech detected in audio clip."}
+
+        return {
+            "status": "success",
+            "transcription": raw_text
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Transcription Error: {str(e)}")
 
 # This endpoint handles the entire pipeline: audio transcription, embedding generation, and database storage.
 @app.post("/api/memory")
