@@ -179,7 +179,8 @@ async def extract_reminders(text: str, memory_id: str, timezone_offset: str = "+
                 "memory_id": memory_id,
                 "user_id": user_id,
                 "task_name": reminder["task_name"],
-                "due_datetime": utc_dt_string
+                "due_datetime": utc_dt_string,
+                "status": "phone"
             }).execute()
             
         return len(reminders)
@@ -704,7 +705,7 @@ async def check_and_send_reminders(authorization: str = Header(None)):
         # 3. Query Supabase for pending reminders within this window using the admin client (bypasses RLS)
         response = supabase_admin.table("reminders") \
             .select("*, memories(user_id)") \
-            .eq("status", "pending") \
+            .in_("status", ["pending", "phone", "both"]) \
             .lte("due_datetime", time_window.isoformat()) \
             .execute()
             
@@ -727,67 +728,70 @@ async def check_and_send_reminders(authorization: str = Header(None)):
         sent_count = 0
         for user_id, tasks in grouped_tasks.items():
             
+            # Separate tasks by what needs to be sent
+            email_tasks = [t for t in tasks if t.get("status") in ("both", "pending")]
+            push_tasks = tasks  # All pending, phone, or both get push
+
             # Fetch the user's actual email address securely via Admin Auth API
-            try:
-                user_record = supabase_admin.auth.admin.get_user_by_id(user_id)
-                user_email = user_record.user.email
-            except Exception as e:
-                print(f"Failed to fetch email for user {user_id}: {e}")
-                continue
-            
-            # Build HTML for all tasks
-            tasks_html = ""
-            for task in tasks:
-                dt_obj = datetime.fromisoformat(task['due_datetime'].replace('Z', '+00:00'))
-                readable_time = dt_obj.strftime("%B %d, %Y at %I:%M %p (UTC)")
-                tasks_html += f"""
-                    <div style="margin-bottom: 15px; padding: 10px; border-left: 4px solid #6750A4; background-color: #f8f9fa;">
-                        <p style="margin: 0 0 5px 0;"><strong>Task:</strong> {task['task_name']}</p>
-                        <p style="margin: 0; color: #555;"><strong>Due:</strong> {readable_time}</p>
+            if email_tasks:
+                try:
+                    user_record = supabase_admin.auth.admin.get_user_by_id(user_id)
+                    user_email = user_record.user.email
+                    
+                    # Build HTML for email tasks
+                    tasks_html = ""
+                    for task in email_tasks:
+                        dt_obj = datetime.fromisoformat(task['due_datetime'].replace('Z', '+00:00'))
+                        readable_time = dt_obj.strftime("%B %d, %Y at %I:%M %p (UTC)")
+                        tasks_html += f"""
+                            <div style="margin-bottom: 15px; padding: 10px; border-left: 4px solid #6750A4; background-color: #f8f9fa;">
+                                <p style="margin: 0 0 5px 0;"><strong>Task:</strong> {task['task_name']}</p>
+                                <p style="margin: 0; color: #555;"><strong>Due:</strong> {readable_time}</p>
+                            </div>
+                        """
+
+                    subject_prefix = "Reminders" if len(email_tasks) > 1 else "Reminder"
+                    subject = f"{subject_prefix}: {len(email_tasks)} upcoming task(s)"
+                    
+                    html_content = f"""
+                    <div style="font-family: sans-serif; padding: 20px;">
+                        <h2>🔔 You have {len(email_tasks)} upcoming reminder(s)</h2>
+                        {tasks_html}
+                        <hr>
+                        <p style="color: gray; font-size: 12px;">Sent automatically by your Voice Memory Hub</p>
                     </div>
-                """
+                    """
+                    
+                    send_brevo_email(user_email, subject, html_content)
+                    print(f"Reminder email sent successfully to {user_email} via Brevo!")
+                except Exception as email_err:
+                    print(f"Failed to send email via Brevo: {email_err}")
 
-            # Send the email via Brevo API
-            try:
-                subject_prefix = "Reminders" if len(tasks) > 1 else "Reminder"
-                subject = f"{subject_prefix}: {len(tasks)} upcoming task(s)"
+            # Send Push Notification via FCM
+            if push_tasks:
+                try:
+                    tokens_resp = supabase_admin.table("fcm_tokens").select("token").eq("user_id", user_id).execute()
+                    if tokens_resp.data:
+                        for task in push_tasks:
+                            task_time = datetime.fromisoformat(task['due_datetime'].replace('Z', '+00:00')).strftime('%I:%M %p')
+                            for t in tokens_resp.data:
+                                message = messaging.Message(
+                                    notification=messaging.Notification(
+                                        title=f"Reminder: {task['task_name']}",
+                                        body=f"Due at {task_time}"
+                                    ),
+                                    token=t["token"],
+                                )
+                                messaging.send(message)
+                        print(f"Sent {len(push_tasks)} separate push notifications successfully to user {user_id}")
+                except Exception as push_err:
+                    print(f"Failed to send push notification: {push_err}")
                 
-                html_content = f"""
-                <div style="font-family: sans-serif; padding: 20px;">
-                    <h2>🔔 You have {len(tasks)} upcoming reminder(s)</h2>
-                    {tasks_html}
-                    <hr>
-                    <p style="color: gray; font-size: 12px;">Sent automatically by your Voice Memory Hub</p>
-                </div>
-                """
-                
-                send_brevo_email(user_email, subject, html_content)
-                print(f"Reminder email sent successfully to {user_email} via Brevo!")
-            except Exception as email_err:
-                print(f"Failed to send email via Brevo: {email_err}")
-
-            # Send Push Notification via FCM (separately for each task)
-            try:
-                tokens_resp = supabase_admin.table("fcm_tokens").select("token").eq("user_id", user_id).execute()
-                if tokens_resp.data:
-                    for task in tasks:
-                        task_time = datetime.fromisoformat(task['due_datetime'].replace('Z', '+00:00')).strftime('%I:%M %p')
-                        for t in tokens_resp.data:
-                            message = messaging.Message(
-                                notification=messaging.Notification(
-                                    title=f"Reminder: {task['task_name']}",
-                                    body=f"Due at {task_time}"
-                                ),
-                                token=t["token"],
-                            )
-                            messaging.send(message)
-                    print(f"Sent {len(tasks)} separate push notifications successfully to user {user_id}")
-            except Exception as push_err:
-                print(f"Failed to send push notification: {push_err}")
-                
-            # 4. Update the reminder status to 'sent'
+            # 4. Update the reminder status
             for task in tasks:
-                supabase_admin.table("reminders").update({"status": "sent"}).eq("id", task["id"]).execute()
+                original_status = task.get("status")
+                new_status = "sent_both" if original_status in ("both", "pending") else "sent_phone"
+                supabase_admin.table("reminders").update({"status": new_status}).eq("id", task["id"]).execute()
                 sent_count += 1
             
         return {"status": "success", "notifications_sent": sent_count}
@@ -1342,7 +1346,7 @@ async def add_manual_reminder(request: ManualReminderRequest, current_user_id: s
             "task": request.task_name,
             "due_datetime": request.due_datetime,
             "is_completed": False,
-            "status": "pending"
+            "status": "phone"
         }
         res = supabase_client.table("reminders").insert(data).execute()
         return {"status": "success", "reminder": res.data[0] if res.data else None}
