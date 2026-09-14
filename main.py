@@ -201,7 +201,7 @@ async def extract_transactions(text: str, memory_id: str = None, user_id: str = 
 
     system_prompt = f"""
     You are a precise financial extraction AI. Analyze the user's text and extract the financial details.
-    Classify each item as one of these three types:
+    Classify each item as one or multiple of these three types:
     1. "expense": Personal spending (money leaving your wallet).
     2. "income": Personal income (e.g., salary, cashback, money entering your wallet).
     3. "split": Shared expense/debt with someone else.
