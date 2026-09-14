@@ -705,7 +705,7 @@ async def check_and_send_reminders(authorization: str = Header(None)):
         # 3. Query Supabase for pending reminders within this window using the admin client (bypasses RLS)
         response = supabase_admin.table("reminders") \
             .select("*, memories(user_id)") \
-            .in_("status", ["pending", "phone", "both"]) \
+            .in_("status", ["phone", "both"]) \
             .lte("due_datetime", time_window.isoformat()) \
             .execute()
             
@@ -729,7 +729,7 @@ async def check_and_send_reminders(authorization: str = Header(None)):
         for user_id, tasks in grouped_tasks.items():
             
             # Separate tasks by what needs to be sent
-            email_tasks = [t for t in tasks if t.get("status") in ("both", "pending")]
+            email_tasks = [t for t in tasks if t.get("status") == "both"]
             push_tasks = tasks  # All pending, phone, or both get push
 
             # Fetch the user's actual email address securely via Admin Auth API
@@ -790,7 +790,7 @@ async def check_and_send_reminders(authorization: str = Header(None)):
             # 4. Update the reminder status
             for task in tasks:
                 original_status = task.get("status")
-                new_status = "sent_both" if original_status in ("both", "pending") else "sent_phone"
+                new_status = "sent_both" if original_status == "both" else "sent_phone"
                 supabase_admin.table("reminders").update({"status": new_status}).eq("id", task["id"]).execute()
                 sent_count += 1
             
