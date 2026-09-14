@@ -696,28 +696,90 @@ async def check_and_send_reminders(authorization: str = Header(None)):
     if authorization != f"Bearer {expected_secret}":
         raise HTTPException(status_code=401, detail="Unauthorized cron trigger")
 
+    def format_remaining_time(due_dt: datetime, now: datetime) -> str:
+        """Returns a human-friendly remaining time string."""
+        delta = due_dt - now
+        total_seconds = int(delta.total_seconds())
+        if total_seconds <= 0:
+            return "right now"
+        minutes = total_seconds // 60
+        hours = minutes // 60
+        if hours >= 1:
+            remaining_mins = minutes % 60
+            if remaining_mins > 0:
+                return f"in {hours}h {remaining_mins}m"
+            return f"in {hours} hour{'s' if hours > 1 else ''}"
+        return f"in {minutes} minute{'s' if minutes != 1 else ''}"
+
+    async def generate_ai_notifications(task_list: list) -> dict:
+        """
+        Makes ONE API call for all tasks of a user to protect token usage.
+        Returns a dict mapping task_name -> {title, body}.
+        Falls back to plain text if the call fails.
+        """
+        task_names = [t["task_name"] for t in task_list]
+        prompt = (
+            "You are writing short, punchy mobile push notification copy for a personal assistant app. "
+            "For each task below, write a cool, motivating notification with:\n"
+            "- title: max 5 words, witty/energetic\n"
+            "- body: max 8 words, action-oriented, no due date or time\n\n"
+            "Return ONLY a valid JSON array in this exact format:\n"
+            '[{"task": "<original task name>", "title": "...", "body": "..."}]\n\n'
+            f"Tasks:\n{chr(10).join(f'- {n}' for n in task_names)}"
+        )
+        try:
+            completion = await groq_client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model="openai/gpt-oss-120b",
+                temperature=0.8,
+                response_format={"type": "json_object"},
+                max_tokens=512,
+            )
+            import json as _json
+            raw = completion.choices[0].message.content.strip()
+            # The model may return either an array or {"notifications": [...]}
+            parsed = _json.loads(raw)
+            if isinstance(parsed, list):
+                items = parsed
+            else:
+                items = next(iter(parsed.values()))
+            return {item["task"]: {"title": item["title"], "body": item["body"]} for item in items}
+        except Exception as ai_err:
+            print(f"AI notification generation failed: {ai_err}")
+            return {}
+
     try:
-        # 2. Define the time window (e.g., look for tasks due in the next 60 minutes)
-        # Using UTC for safe database comparison
+        # 2. Define the time window — look for tasks due within the next 60 minutes
         now_utc = datetime.now(timezone.utc)
         time_window = now_utc + timedelta(minutes=60)
-        
-        # 3. Query Supabase for pending reminders within this window using the admin client (bypasses RLS)
+
+        # 3. Query Supabase for active reminders within this window (bypasses RLS)
         response = supabase_admin.table("reminders") \
             .select("*, memories(user_id)") \
             .in_("status", ["phone", "both"]) \
             .lte("due_datetime", time_window.isoformat()) \
             .execute()
-            
+
         due_tasks = response.data
-        
+
         if not due_tasks:
             return {"status": "success", "message": "No pending tasks in the upcoming window."}
 
-        # Group tasks by user_id
+        # 4. Separate completed tasks (mark them 'none') from actionable tasks
+        completed_ids = [t["id"] for t in due_tasks if t.get("is_completed") == True]
+        actionable_tasks = [t for t in due_tasks if t.get("is_completed") != True]
+
+        for task_id in completed_ids:
+            supabase_admin.table("reminders").update({"status": "none"}).eq("id", task_id).execute()
+            print(f"Task {task_id} was already completed — marked as 'none', skipping notification.")
+
+        if not actionable_tasks:
+            return {"status": "success", "message": "All due tasks were already completed."}
+
+        # 5. Group actionable tasks by user_id — enforces strict per-user isolation
         from collections import defaultdict
         grouped_tasks = defaultdict(list)
-        for task in due_tasks:
+        for task in actionable_tasks:
             memory_data = task.get("memories")
             user_id = memory_data.get("user_id") if memory_data else None
             if user_id:
@@ -727,75 +789,84 @@ async def check_and_send_reminders(authorization: str = Header(None)):
 
         sent_count = 0
         for user_id, tasks in grouped_tasks.items():
-            
-            # Separate tasks by what needs to be sent
-            email_tasks = [t for t in tasks if t.get("status") == "both"]
-            push_tasks = tasks  # All pending, phone, or both get push
+            # --- Everything below is strictly scoped to THIS user_id only ---
 
-            # Fetch the user's actual email address securely via Admin Auth API
+            email_tasks = [t for t in tasks if t.get("status") == "both"]
+            push_tasks = tasks  # phone + both both get push
+
+            # 6. Generate AI notification copy for this user's push tasks (single API call)
+            ai_copy = await generate_ai_notifications(push_tasks) if push_tasks else {}
+
+            # 7. Send a SINGLE packed email for all email_tasks (one email per user per run)
             if email_tasks:
                 try:
                     user_record = supabase_admin.auth.admin.get_user_by_id(user_id)
-                    user_email = user_record.user.email
-                    
-                    # Build HTML for email tasks
+                    user_email = user_record.user.email  # scoped to this user_id only
+
                     tasks_html = ""
                     for task in email_tasks:
-                        dt_obj = datetime.fromisoformat(task['due_datetime'].replace('Z', '+00:00'))
-                        readable_time = dt_obj.strftime("%B %d, %Y at %I:%M %p (UTC)")
+                        dt_obj = datetime.fromisoformat(task["due_datetime"].replace("Z", "+00:00"))
+                        time_left = format_remaining_time(dt_obj, now_utc)
                         tasks_html += f"""
                             <div style="margin-bottom: 15px; padding: 10px; border-left: 4px solid #6750A4; background-color: #f8f9fa;">
                                 <p style="margin: 0 0 5px 0;"><strong>Task:</strong> {task['task_name']}</p>
-                                <p style="margin: 0; color: #555;"><strong>Due:</strong> {readable_time}</p>
+                                <p style="margin: 0; color: #555;"><strong>Due:</strong> {time_left}</p>
                             </div>
                         """
 
-                    subject_prefix = "Reminders" if len(email_tasks) > 1 else "Reminder"
-                    subject = f"{subject_prefix}: {len(email_tasks)} upcoming task(s)"
-                    
+                    subject = f"🔔 {len(email_tasks)} Reminder{'s' if len(email_tasks) > 1 else ''} Coming Up"
                     html_content = f"""
                     <div style="font-family: sans-serif; padding: 20px;">
-                        <h2>🔔 You have {len(email_tasks)} upcoming reminder(s)</h2>
+                        <h2>You have {len(email_tasks)} upcoming reminder{'s' if len(email_tasks) > 1 else ''}!</h2>
                         {tasks_html}
                         <hr>
                         <p style="color: gray; font-size: 12px;">Sent automatically by your Voice Memory Hub</p>
                     </div>
                     """
-                    
-                    send_brevo_email(user_email, subject, html_content)
-                    print(f"Reminder email sent successfully to {user_email} via Brevo!")
-                except Exception as email_err:
-                    print(f"Failed to send email via Brevo: {email_err}")
 
-            # Send Push Notification via FCM
+                    send_brevo_email(user_email, subject, html_content)
+                    print(f"Packed reminder email ({len(email_tasks)} tasks) sent to user {user_id}")
+                except Exception as email_err:
+                    print(f"Failed to send email to user {user_id}: {email_err}")
+
+            # 8. Send individual FCM push notifications
             if push_tasks:
                 try:
                     tokens_resp = supabase_admin.table("fcm_tokens").select("token").eq("user_id", user_id).execute()
                     if tokens_resp.data:
                         for task in push_tasks:
-                            task_time = datetime.fromisoformat(task['due_datetime'].replace('Z', '+00:00')).strftime('%I:%M %p')
+                            dt_obj = datetime.fromisoformat(task["due_datetime"].replace("Z", "+00:00"))
+                            time_left = format_remaining_time(dt_obj, now_utc)
+
+                            copy = ai_copy.get(task["task_name"])
+                            if copy:
+                                notif_title = copy["title"]
+                                notif_body = f"{copy['body']} ({time_left})"
+                            else:
+                                notif_title = f"Reminder: {task['task_name']}"
+                                notif_body = f"Due {time_left}"
+
                             for t in tokens_resp.data:
                                 message = messaging.Message(
                                     notification=messaging.Notification(
-                                        title=f"Reminder: {task['task_name']}",
-                                        body=f"Due at {task_time}"
+                                        title=notif_title,
+                                        body=notif_body,
                                     ),
                                     token=t["token"],
                                 )
                                 messaging.send(message)
-                        print(f"Sent {len(push_tasks)} separate push notifications successfully to user {user_id}")
+                        print(f"Sent {len(push_tasks)} push notifications to user {user_id}")
                 except Exception as push_err:
-                    print(f"Failed to send push notification: {push_err}")
-                
-            # 4. Update the reminder status
+                    print(f"Failed to send push notifications to user {user_id}: {push_err}")
+
+            # 9. Update statuses
             for task in tasks:
-                original_status = task.get("status")
-                new_status = "sent_both" if original_status == "both" else "sent_phone"
+                new_status = "sent_both" if task.get("status") == "both" else "sent_phone"
                 supabase_admin.table("reminders").update({"status": new_status}).eq("id", task["id"]).execute()
                 sent_count += 1
-            
+
         return {"status": "success", "notifications_sent": sent_count}
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Cron Engine Error: {str(e)}")
 
@@ -1070,7 +1141,7 @@ async def chat_with_memories(q: str, timezone_offset: str = "+00:00", current_us
         \"\"\"
         """
 
-        # # 4. Construct the system prompt to turn Llama 3.1 into a reasoning ledger
+        # # 4. Construct the system prompt to turn ai model into a reasoning ledger
         # system_prompt = f"""
         # You are the reasoning core of MemApp, a personal cognitive assistant specializing in financial ledger tracking. 
         # Your objective is to answer the user's question using only the verified facts inside the provided context.
@@ -1097,7 +1168,7 @@ async def chat_with_memories(q: str, timezone_offset: str = "+00:00", current_us
         # \"\"\"
         # """
 
-        # 5. Query Llama 3.1 to compute and rationalize the final answer
+        # 5. Query ai model to compute and rationalize the final answer
         completion = await groq_client.chat.completions.create(
             messages=[
                 {"role": "system", "content": system_prompt},
