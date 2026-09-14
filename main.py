@@ -327,10 +327,10 @@ async def store_text_memory(request: TextMemoryRequest, background_tasks: Backgr
 # This endpoint handles just the transcription (allows user to review before saving)
 @app.post("/api/transcribe")
 async def transcribe_audio_only(
-    current_user_id: str = Depends(get_current_user),
+    background_tasks: BackgroundTasks, 
     file: UploadFile = File(...),
     timezone_offset: str = Form("+00:00"),
-    background_tasks: BackgroundTasks = BackgroundTasks()
+    current_user_id: str = Depends(get_current_user)
 ):
     # Validate allowed formats
     if not file.filename.endswith(('.wav', '.m4a', '.mp3', '.ogg', '.webm')):
@@ -361,10 +361,10 @@ async def transcribe_audio_only(
 # This endpoint handles the entire pipeline: audio transcription, embedding generation, and database storage.
 @app.post("/api/memory")
 async def transcribe_and_store_audio(
-    current_user_id: str = Depends(get_current_user),
     background_tasks: BackgroundTasks, 
     file: UploadFile = File(...),
-    timezone_offset: str = Form("+00:00")
+    timezone_offset: str = Form("+00:00"),
+    current_user_id: str = Depends(get_current_user)
 ):
     # Validate allowed formats
     if not file.filename.endswith(('.wav', '.m4a', '.mp3', '.ogg', '.webm')):
