@@ -3,6 +3,9 @@
 import os
 import io
 import time
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Form, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from standardwebhooks.webhooks import Webhook
@@ -991,15 +994,29 @@ async def send_auth_email(request: Request):
             </div>
             """
 
-        response = resend.Emails.send({
-            "from": "MemApp AI <onboarding@resend.dev>",
-            "to": email,
-            "subject": subject,
-            "html": html_content
-        })
+        # Send via Python SMTP (e.g., Gmail)
+        smtp_email = os.getenv("SMTP_EMAIL")
+        smtp_password = os.getenv("SMTP_PASSWORD")
         
-        # Supabase Custom Email hook requires returning an empty JSON object or the original payload.
-        # Returning {"status": "success"} throws an "Invalid payload sent to hook" error in Supabase!
+        if not smtp_email or not smtp_password:
+            print("ERROR: SMTP_EMAIL or SMTP_PASSWORD is not set in .env")
+            return {}
+
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = f"Voice Memory Hub <{smtp_email}>"
+        msg["To"] = email
+
+        part = MIMEText(html_content, "html")
+        msg.attach(part)
+
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(smtp_email, smtp_password)
+        server.sendmail(smtp_email, email, msg.as_string())
+        server.quit()
+        
+        print(f"[{action_type}] Successfully sent SMTP email to {email}")
         return {}
     except Exception as e:
         print(f"FAILED TO PROCESS WEBHOOK: {str(e)}")
