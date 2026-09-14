@@ -191,11 +191,13 @@ async def extract_reminders(text: str, memory_id: str, timezone_offset: str = "+
 
 async def extract_transactions(text: str, memory_id: str = None, user_id: str = None):
     # Fetch available categories to pass to the LLM
+    default_categories = ["Food & Groceries", "Clothing & Lifestyle", "Travel", "Entertainment", "Online Shopping", "Others"]
     try:
         cat_res = supabase_client.table("expense_categories").select("name").eq("user_id", user_id).execute()
-        categories = [c["name"] for c in cat_res.data]
+        custom_categories = [c["name"] for c in cat_res.data]
+        categories = default_categories + custom_categories
     except:
-        categories = ["Food & Groceries", "Travel", "Entertainment", "Online Shopping", "Others"]
+        categories = default_categories
 
     system_prompt = f"""
     You are a precise financial extraction AI. Analyze the user's text and extract the financial details.
@@ -258,6 +260,8 @@ async def extract_transactions(text: str, memory_id: str = None, user_id: str = 
             
             if memory_id:
                 t["memory_id"] = memory_id
+            if user_id:
+                t["user_id"] = user_id
             valid_transactions.append(t)
         
         if valid_transactions:
@@ -300,8 +304,14 @@ class CategoryRequest(BaseModel):
 @app.get("/api/expense_categories")
 async def get_expense_categories(current_user_id: str = Depends(get_current_user)):
     try:
+        default_names = ["Food & Groceries", "Clothing & Lifestyle", "Travel", "Entertainment", "Online Shopping", "Others"]
+        default_categories = [{"id": None, "name": name, "user_id": None} for name in default_names]
+        
         response = supabase_client.table("expense_categories").select("*").eq("user_id", current_user_id).order("name").execute()
-        return {"status": "success", "categories": response.data}
+        
+        # Merge default and user-specific categories
+        all_categories = default_categories + response.data
+        return {"status": "success", "categories": all_categories}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
