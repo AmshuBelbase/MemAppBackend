@@ -276,6 +276,43 @@ async def extract_transactions(text: str, memory_id: str = None, user_id: str = 
 
 # --- API ENDPOINTS ---
 
+@app.post("/api/memories/{memory_id}/extract-reminder")
+async def manual_extract_reminder(memory_id: str, request: Request, current_user_id: str = Depends(get_current_user)):
+    # Parse body if timezone_offset exists, else default
+    timezone_offset = "+00:00"
+    try:
+        body = await request.json()
+        if "timezone_offset" in body:
+            timezone_offset = body["timezone_offset"]
+    except:
+        pass
+
+    res = supabase_client.table("memories").select("raw_text").eq("id", memory_id).eq("user_id", current_user_id).execute()
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Memory not found")
+        
+    raw_text = res.data[0]["raw_text"]
+    count = await extract_reminders(raw_text, memory_id, timezone_offset, current_user_id)
+    
+    if count == 0:
+        return {"status": "error", "message": "Could not extract a reminder from this note."}
+        
+    return {"status": "success", "message": f"Successfully extracted {count} reminder(s)."}
+
+@app.post("/api/memories/{memory_id}/extract-finance")
+async def manual_extract_finance(memory_id: str, current_user_id: str = Depends(get_current_user)):
+    res = supabase_client.table("memories").select("raw_text").eq("id", memory_id).eq("user_id", current_user_id).execute()
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Memory not found")
+        
+    raw_text = res.data[0]["raw_text"]
+    count = await extract_transactions(raw_text, memory_id, current_user_id)
+    
+    if count == 0:
+        return {"status": "error", "message": "Could not extract a finance transaction from this note."}
+        
+    return {"status": "success", "message": f"Successfully extracted {count} transaction(s)."}
+
 @app.get("/api/memories")
 async def get_all_memories(current_user_id: str = Depends(get_current_user)):
     try:
