@@ -912,6 +912,73 @@ async def get_all_transactions(current_user_id: str = Depends(get_current_user))
 class FCMTokenRequest(BaseModel):
     token: str
 
+class EmailData(BaseModel):
+    token: str
+    token_hash: str
+    redirect_to: str
+    email_action_type: str
+    site_url: str
+
+class UserData(BaseModel):
+    id: str
+    email: str
+    
+class SupabaseWebhookPayload(BaseModel):
+    user: UserData
+    email_data: EmailData
+
+@app.post("/api/auth/send-email")
+async def send_auth_email(payload: SupabaseWebhookPayload):
+    try:
+        email = payload.user.email
+        action_type = payload.email_data.email_action_type
+        token = payload.email_data.token
+
+        subject = "Your Voice Memory Verification Code"
+        html_content = f"""
+        <div style="font-family: sans-serif; padding: 20px; text-align: center;">
+            <h2 style="color: #6750A4;">Welcome to MemApp!</h2>
+            <p>Please use the following 6-digit code to verify your email address:</p>
+            <div style="margin: 20px auto; padding: 15px; background-color: #f4f4f5; border-radius: 8px; font-size: 28px; font-weight: bold; color: #6750A4; letter-spacing: 4px; display: inline-block;">
+                {token}
+            </div>
+        </div>
+        """
+
+        if action_type == "recovery":
+            subject = "Reset your password"
+            html_content = f"""
+            <div style="font-family: sans-serif; padding: 20px; text-align: center;">
+                <h2 style="color: #6750A4;">Password Reset</h2>
+                <p>Please use the following 6-digit code to reset your password:</p>
+                <div style="margin: 20px auto; padding: 15px; background-color: #f4f4f5; border-radius: 8px; font-size: 28px; font-weight: bold; color: #6750A4; letter-spacing: 4px; display: inline-block;">
+                    {token}
+                </div>
+            </div>
+            """
+        elif action_type == "email_change":
+            subject = "Confirm your new email"
+            html_content = f"""
+            <div style="font-family: sans-serif; padding: 20px; text-align: center;">
+                <h2 style="color: #6750A4;">Email Change</h2>
+                <p>Please use the following 6-digit code to confirm your new email:</p>
+                <div style="margin: 20px auto; padding: 15px; background-color: #f4f4f5; border-radius: 8px; font-size: 28px; font-weight: bold; color: #6750A4; letter-spacing: 4px; display: inline-block;">
+                    {token}
+                </div>
+            </div>
+            """
+
+        response = resend.Emails.send({
+            "from": "MemApp AI <onboarding@resend.dev>",
+            "to": email,
+            "subject": subject,
+            "html": html_content
+        })
+        
+        return {"status": "success", "id": response.get("id")}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to send auth email: {str(e)}")
+
 @app.post("/api/fcm-token")
 async def register_fcm_token(req: FCMTokenRequest, current_user_id: str = Depends(get_current_user)):
     try:
