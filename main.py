@@ -3,9 +3,7 @@
 import os
 import io
 import time
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import requests
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Form, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from standardwebhooks.webhooks import Webhook
@@ -20,6 +18,30 @@ import secrets
 from fastapi import Header
 from datetime import datetime, timedelta, timezone
 from pydantic import BaseModel
+
+def send_brevo_email(to_email: str, subject: str, html_content: str):
+    api_key = os.environ.get("BREVO_API_KEY")
+    sender_email = os.environ.get("BREVO_SENDER_EMAIL")
+    
+    if not api_key or not sender_email:
+        raise Exception("BREVO_API_KEY or BREVO_SENDER_EMAIL is not set in .env")
+        
+    url = "https://api.brevo.com/v3/smtp/email"
+    headers = {
+        "accept": "application/json",
+        "api-key": api_key,
+        "content-type": "application/json"
+    }
+    payload = {
+        "sender": {"name": "MemApp Voice Hub", "email": sender_email},
+        "to": [{"email": to_email}],
+        "subject": subject,
+        "htmlContent": html_content
+    }
+    
+    response = requests.post(url, json=payload, headers=headers, timeout=10)
+    if response.status_code not in (200, 201, 202):
+        raise Exception(f"Brevo API returned {response.status_code}: {response.text}")
 
 # Load environment variables from .env
 load_dotenv()
@@ -539,41 +561,24 @@ async def check_and_send_reminders(authorization: str = Header(None)):
                     </div>
                 """
 
-            # Send the email via SMTP (e.g. Gmail)
+            # Send the email via Brevo API
             try:
-                smtp_email = os.getenv("SMTP_EMAIL")
-                smtp_password = os.getenv("SMTP_PASSWORD")
+                subject_prefix = "Reminders" if len(tasks) > 1 else "Reminder"
+                subject = f"{subject_prefix}: {len(tasks)} upcoming task(s)"
                 
-                if smtp_email and smtp_password and user_email:
-                    msg = MIMEMultipart("alternative")
-                    subject_prefix = "Reminders" if len(tasks) > 1 else "Reminder"
-                    msg["Subject"] = f"{subject_prefix}: {len(tasks)} upcoming task(s)"
-                    msg["From"] = f"Voice Memory Hub <{smtp_email}>"
-                    msg["To"] = user_email
-
-                    html_content = f"""
-                    <div style="font-family: sans-serif; padding: 20px;">
-                        <h2>🔔 You have {len(tasks)} upcoming reminder(s)</h2>
-                        {tasks_html}
-                        <hr>
-                        <p style="color: gray; font-size: 12px;">Sent automatically by your Voice Memory Hub</p>
-                    </div>
-                    """
-                    
-                    part = MIMEText(html_content, "html")
-                    msg.attach(part)
-
-                    server = smtplib.SMTP("smtp.gmail.com", 587)
-                    server.starttls()
-                    server.login(smtp_email, smtp_password)
-                    # Use user_email for the actual recipient
-                    server.sendmail(smtp_email, user_email, msg.as_string())
-                    server.quit()
-                    print(f"Reminder email sent successfully to {user_email}!")
-                else:
-                    print("SMTP_EMAIL or SMTP_PASSWORD not set. Skipping email reminder.")
+                html_content = f"""
+                <div style="font-family: sans-serif; padding: 20px;">
+                    <h2>🔔 You have {len(tasks)} upcoming reminder(s)</h2>
+                    {tasks_html}
+                    <hr>
+                    <p style="color: gray; font-size: 12px;">Sent automatically by your Voice Memory Hub</p>
+                </div>
+                """
+                
+                send_brevo_email(user_email, subject, html_content)
+                print(f"Reminder email sent successfully to {user_email} via Brevo!")
             except Exception as email_err:
-                print(f"Failed to send email: {email_err}")
+                print(f"Failed to send email via Brevo: {email_err}")
 
             # Send Push Notification via FCM (separately for each task)
             try:
@@ -1008,13 +1013,8 @@ async def request_otp(payload: OTPRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save pending signup: {str(e)}")
 
-    # 4. Send Email via SMTP
+    # 4. Send Email via Brevo
     try:
-        smtp_email = os.getenv("SMTP_EMAIL")
-        smtp_password = os.getenv("SMTP_PASSWORD")
-        if not smtp_email or not smtp_password:
-            raise HTTPException(status_code=500, detail="SMTP server not configured")
-
         subject = "Your MemApp Verification Code"
         html_content = f"""
         <div style="font-family: sans-serif; padding: 20px; text-align: center;">
@@ -1027,23 +1027,10 @@ async def request_otp(payload: OTPRequest):
         </div>
         """
 
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"] = f"Voice Memory Hub <{smtp_email}>"
-        msg["To"] = email
-
-        part = MIMEText(html_content, "html")
-        msg.attach(part)
-
-        server = smtplib.SMTP("smtp.gmail.com", 587, timeout=10)
-        server.starttls()
-        server.login(smtp_email, smtp_password)
-        server.sendmail(smtp_email, email, msg.as_string())
-        server.quit()
-        
-        return {"status": "success", "message": "OTP sent to email"}
+        send_brevo_email(email, subject, html_content)
+        return {"status": "success", "message": "OTP sent to email via Brevo"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to send email: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to send email via Brevo: {str(e)}")
 
 
 @app.post("/api/auth/verify-otp")
