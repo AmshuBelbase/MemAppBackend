@@ -3,7 +3,6 @@
 
 import os
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Form, Depends
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from groq import AsyncGroq
