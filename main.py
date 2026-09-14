@@ -199,6 +199,23 @@ async def extract_transactions(text: str, memory_id: str = None, user_id: str = 
     except:
         categories = default_categories
 
+    known_people_list = []
+    try:
+        if user_id:
+            cred_res = supabase_client.table("transactions").select("creditor").eq("user_id", user_id).execute()
+            debt_res = supabase_client.table("transactions").select("debtor").eq("user_id", user_id).execute()
+            
+            known_people = set()
+            for row in (cred_res.data or []):
+                if row.get("creditor") and row["creditor"] != "Self":
+                    known_people.add(row["creditor"].strip())
+            for row in (debt_res.data or []):
+                if row.get("debtor") and row["debtor"] != "Self":
+                    known_people.add(row["debtor"].strip())
+            known_people_list = list(known_people)
+    except Exception as e:
+        print(f"Error fetching known people: {e}")
+
     system_prompt = f"""
     You are a precise financial extraction AI. Analyze the user's text and extract the financial details.
     
@@ -223,7 +240,12 @@ async def extract_transactions(text: str, memory_id: str = None, user_id: str = 
     If "transaction_type" is "split", add:
     - "creditor": The ONE person owed money (usually "Self"). Format as Title Case.
     - "debtor": The ONE person who owes money. Format as Title Case.
-    - CRITICAL SCHEMA RULE: "creditor" and "debtor" must NEVER contain multiple names (e.g., "Arush and Siddhant" is strictly invalid). You must create separate split objects for each person.
+    - CRITICAL SCHEMA RULE: "creditor" and "debtor" must NEVER contain multiple names (e.g., "sara and priya" is strictly invalid). You must create separate split objects for each person.
+    
+    ENTITY RESOLUTION (NAME CORRECTION):
+    Here is a list of people the user has transacted with before: {known_people_list}
+    - If the text mentions a name that is phonetically similar to a name on this list (e.g., "sara" -> "sarah"), map it to the exact spelling in the list.
+    - EXCEPTION: If the user explicitly provides a last name or qualifier to distinguish someone (e.g., "priya Sharma" when only "priya" is known), treat them as a NEW distinct person and output their full name. Do not over-correct if they are clearly specifying a different person.
     
     EXAMPLES OF ALL 15 POSSIBLE SCENARIOS (FOLLOW THIS EXACT MAPPING LOGIC):
     
@@ -262,11 +284,11 @@ async def extract_transactions(text: str, memory_id: str = None, user_id: str = 
     ]}}
 
     6. Money leaves user's wallet for a group, user included
-    Input: "I bought 3 bags for me, Arush and Siddhant for 1200 total"
+    Input: "I bought 3 bags for me, sara and priya for 1200 total"
     Output: {{"transactions": [
       {{"transaction_type": "expense", "amount": 1200, "currency": "INR", "description": "3 bags", "category": "Online Shopping"}},
-      {{"transaction_type": "split", "creditor": "Self", "debtor": "Arush", "amount": 400, "currency": "INR", "description": "Bag"}},
-      {{"transaction_type": "split", "creditor": "Self", "debtor": "Siddhant", "amount": 400, "currency": "INR", "description": "Bag"}}
+      {{"transaction_type": "split", "creditor": "Self", "debtor": "sara", "amount": 400, "currency": "INR", "description": "Bag"}},
+      {{"transaction_type": "split", "creditor": "Self", "debtor": "priya", "amount": 400, "currency": "INR", "description": "Bag"}}
     ]}}
 
     7. Money does not leave wallet (expense by someone else, they are included, user included)
@@ -1036,7 +1058,7 @@ async def chat_with_memories(q: str, timezone_offset: str = "+00:00", current_us
           * Sum up all transactions involving the person mentioned.
           * Anything the user paid/lent counts as positive (+). Anything the other person paid/returned counts as negative (-).
           * Compute the final net total carefully.
-          * Example Output Style: "Siddhant gave you 50. You gave him 200. Siddhant paid you 100. So now he has to give you 500 only."
+          * Example Output Style: "priya gave you 50. You gave him 200. priya paid you 100. So now he has to give you 500 only."
         
         Retrieved Memories Context:
         \"\"\"
