@@ -1,10 +1,12 @@
 # PS D:\PROJECTS\MemApp\Backend> curl.exe -X POST "http://127.0.0.1:8000/api/internal/check-reminders" -H "Authorization: Bearer api_key"
 
-
 import os
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Form, Depends
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+import io
+import time
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Form, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
+from standardwebhooks.webhooks import Webhook
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from groq import AsyncGroq
 from dotenv import load_dotenv
 from supabase import create_client, Client 
@@ -928,8 +930,23 @@ class SupabaseWebhookPayload(BaseModel):
     email_data: EmailData
 
 @app.post("/api/auth/send-email")
-async def send_auth_email(payload: SupabaseWebhookPayload):
+async def send_auth_email(request: Request):
+    # 1. Verify Webhook Signature (Standard Webhooks)
+    secret = os.getenv("SUPABASE_WEBHOOK_SECRET")
+    if secret:
+        headers = request.headers
+        payload_body = await request.body()
+        try:
+            wh = Webhook(secret)
+            wh.verify(payload_body, dict(headers))
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid webhook signature: {str(e)}")
+
+    # 2. Parse Payload
     try:
+        data = await request.json()
+        payload = SupabaseWebhookPayload(**data)
+        
         email = payload.user.email
         action_type = payload.email_data.email_action_type
         token = payload.email_data.token
