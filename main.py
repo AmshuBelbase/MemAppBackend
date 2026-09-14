@@ -1094,6 +1094,72 @@ async def register_fcm_token(req: FCMTokenRequest, current_user_id: str = Depend
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
 
+class ManualReminderRequest(BaseModel):
+    memory_id: str
+    task_name: str
+    due_datetime: str
+
+class ManualTransactionRequest(BaseModel):
+    memory_id: str
+    transaction_type: str
+    amount: float
+    currency: str = "INR"
+    description: str = ""
+    category: str | None = None
+    creditor: str | None = None
+    debtor: str | None = None
+
+@app.delete("/api/reminders/{reminder_id}")
+async def delete_reminder(reminder_id: str, current_user_id: str = Depends(get_current_user)):
+    try:
+        supabase_client.table("reminders").delete().eq("user_id", current_user_id).eq("id", reminder_id).execute()
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/transactions/{transaction_id}")
+async def delete_transaction(transaction_id: str, current_user_id: str = Depends(get_current_user)):
+    try:
+        supabase_client.table("transactions").delete().eq("user_id", current_user_id).eq("id", transaction_id).execute()
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/reminders/manual")
+async def add_manual_reminder(request: ManualReminderRequest, current_user_id: str = Depends(get_current_user)):
+    try:
+        data = {
+            "user_id": current_user_id,
+            "memory_id": request.memory_id,
+            "task": request.task_name,
+            "due_datetime": request.due_datetime,
+            "is_completed": False,
+            "status": "pending"
+        }
+        res = supabase_client.table("reminders").insert(data).execute()
+        return {"status": "success", "reminder": res.data[0] if res.data else None}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/transactions/manual")
+async def add_manual_transaction(request: ManualTransactionRequest, current_user_id: str = Depends(get_current_user)):
+    try:
+        data = {
+            "user_id": current_user_id,
+            "memory_id": request.memory_id,
+            "transaction_type": request.transaction_type,
+            "amount": request.amount,
+            "currency": request.currency,
+            "description": request.description,
+            "category": request.category,
+            "creditor": request.creditor,
+            "debtor": request.debtor
+        }
+        res = supabase_client.table("transactions").insert(data).execute()
+        return {"status": "success", "transaction": res.data[0] if res.data else None}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 if __name__ == "__main__":
     import uvicorn
     # Read assigned port from cloud environment variable, fallback to 8000 locally
