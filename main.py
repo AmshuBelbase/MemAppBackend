@@ -206,10 +206,16 @@ async def extract_transactions(text: str, memory_id: str = None, user_id: str = 
     2. "income": Personal income (e.g., salary, cashback, money entering your wallet).
     3. "split": Shared expense/debt with someone else.
     
-    CRITICAL RULE FOR PAYING FOR OTHERS: 
-    If the user states they bought something FOR someone else (e.g., "I paid 500 for John for his grocery"), you MUST extract TWO separate transactions:
-    - An "expense" transaction (because the user's money left their wallet).
-    - A "split" transaction (where the other person is the "debtor" and "Self" is the "creditor").
+    CRITICAL RULE FOR PURCHASING FOR OTHERS (money leaving user's wallet for someone else): 
+    If the text implies the user paid for someone else (e.g., "I bought [Name] dinner", "I paid 500 for [Name]", "I got snacks for [Name]"), you MUST ALWAYS output EXACTLY TWO transactions for that single event:
+    1. One "expense" transaction for the total amount spent (since money left the user's wallet).
+    2. One "split" transaction for the same amount, where the other person is the "debtor" and "Self" is the "creditor".
+    Do not skip the split transaction just because the name is lowercase or casually phrased. Any purchase involving another person receiving the goods implies they owe the user.
+
+    CRITICAL RULE FOR RECEIVING MONEY FROM OTHERS (money entering user's wallet from someone else):
+    If the text implies someone gave the user money (e.g., "[Name] paid me 500", "I received 500 from [Name]"), you MUST ALWAYS output EXACTLY TWO transactions for that single event:
+    1. One "income" transaction for the total amount received (since money entered the user's wallet).
+    2. One "split" transaction for the same amount, where the other person is the "creditor" and "Self" is the "debtor".
     
     Assume the user speaking is named "Self".
     Calculate the total amounts if quantities and unit prices are given.
