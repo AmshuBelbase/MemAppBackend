@@ -72,6 +72,10 @@ supabase_client: Client = create_client(supabase_url, supabase_key)
 supabase_service_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", supabase_key) 
 supabase_admin: Client = create_client(supabase_url, supabase_service_key)
 
+@app.get("/api/health")
+async def health_check():
+    return {"status": "ok"}
+
 import firebase_admin
 from firebase_admin import credentials, messaging
 
