@@ -2,7 +2,9 @@
 
 
 import os
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Form
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Form, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from groq import AsyncGroq
 from dotenv import load_dotenv
@@ -19,6 +21,31 @@ from pydantic import BaseModel
 load_dotenv()
 
 app = FastAPI()
+
+security = HTTPBearer()
+
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
+    token = credentials.credentials
+    try:
+        user_response = supabase_client.auth.get_user(token)
+        if not user_response or not user_response.user:
+            raise HTTPException(status_code=401, detail="Invalid authentication token")
+        return user_response.user.id
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Unauthorized: {str(e)}")
+
+
+security = HTTPBearer()
+
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
+    token = credentials.credentials
+    try:
+        user_response = supabase_client.auth.get_user(token)
+        if not user_response or not user_response.user:
+            raise HTTPException(status_code=401, detail="Invalid authentication token")
+        return user_response.user.id
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Unauthorized: {str(e)}")
 
 # Enable CORS for browser communication
 app.add_middleware(
@@ -55,7 +82,7 @@ try:
 except Exception as e:
     print(f"Warning: Failed to initialize Firebase Admin SDK: {e}")
 
-async def extract_reminders(text: str, memory_id: str, timezone_offset: str = "+00:00"):
+async def extract_reminders(text: str, memory_id: str, timezone_offset: str = "+00:00", user_id: str = None):
     # Give the LLM the current date/time context using the user's timezone offset
     # Timezone offset format expected: "+05:45", "-08:00", etc.
     
@@ -117,6 +144,7 @@ async def extract_reminders(text: str, memory_id: str, timezone_offset: str = "+
 
             supabase_client.table("reminders").insert({
                 "memory_id": memory_id,
+                "user_id": user_id,
                 "task_name": reminder["task_name"],
                 "due_datetime": utc_dt_string
             }).execute()
@@ -128,10 +156,10 @@ async def extract_reminders(text: str, memory_id: str, timezone_offset: str = "+
         return 0
 
 
-async def extract_transactions(text: str, memory_id: str = None):
+async def extract_transactions(text: str, memory_id: str = None, user_id: str = None):
     # Fetch available categories to pass to the LLM
     try:
-        cat_res = supabase_client.table("expense_categories").select("name").execute()
+        cat_res = supabase_client.table("expense_categories").select("name").eq("user_id", user_id).execute()
         categories = [c["name"] for c in cat_res.data]
     except:
         categories = ["Food & Groceries", "Travel", "Entertainment", "Online Shopping", "Others"]
@@ -212,10 +240,12 @@ async def extract_transactions(text: str, memory_id: str = None):
 # --- API ENDPOINTS ---
 
 @app.get("/api/memories")
-async def get_all_memories():
+async def get_all_memories(current_user_id: str = Depends(get_current_user)):
     try:
         # Fetch the top 100 recent memories (we exclude the embedding array to save bandwidth)
         response = supabase_client.table("memories") \
+            .select("id, raw_text, created_at, source, is_starred") \
+            .eq("user_id", current_user_id) \
             .select("id, raw_text, created_at, source, is_starred") \
             .order("id", desc=True) \
             .limit(100) \
@@ -235,23 +265,23 @@ class CategoryRequest(BaseModel):
     name: str
 
 @app.get("/api/expense_categories")
-async def get_expense_categories():
+async def get_expense_categories(current_user_id: str = Depends(get_current_user)):
     try:
-        response = supabase_client.table("expense_categories").select("*").order("name").execute()
+        response = supabase_client.table("expense_categories").select("*").eq("user_id", current_user_id).order("name").execute()
         return {"status": "success", "categories": response.data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/expense_categories")
-async def add_expense_category(req: CategoryRequest):
+async def add_expense_category(req: CategoryRequest, current_user_id: str = Depends(get_current_user)):
     try:
-        response = supabase_client.table("expense_categories").insert({"name": req.name}).execute()
+        response = supabase_client.table("expense_categories").insert({"name": req.name, "user_id": current_user_id}).execute()
         return {"status": "success", "category": response.data[0]}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/memory/text")
-async def store_text_memory(request: TextMemoryRequest, background_tasks: BackgroundTasks):
+async def store_text_memory(request: TextMemoryRequest, background_tasks: BackgroundTasks, current_user_id: str = Depends(get_current_user)):
     raw_text = request.text.strip()
     if not raw_text:
         raise HTTPException(status_code=400, detail="Text cannot be empty.")
@@ -271,6 +301,7 @@ async def store_text_memory(request: TextMemoryRequest, background_tasks: Backgr
 
         # 2. Store into Supabase Table
         data = {
+            "user_id": current_user_id,
             "raw_text": raw_text,
             "embedding": text_embedding,
             "source": request.source
@@ -280,8 +311,8 @@ async def store_text_memory(request: TextMemoryRequest, background_tasks: Backgr
         memory_id = response.data[0]["id"]
 
         # 3. Run the LLM extractors in the background
-        background_tasks.add_task(extract_reminders, raw_text, memory_id, request.timezone_offset)
-        background_tasks.add_task(extract_transactions, raw_text, memory_id)
+        background_tasks.add_task(extract_reminders, raw_text, memory_id, request.timezone_offset, current_user_id)
+        background_tasks.add_task(extract_transactions, raw_text, memory_id, current_user_id)
         
         return {
             "status": "success",
@@ -296,6 +327,7 @@ async def store_text_memory(request: TextMemoryRequest, background_tasks: Backgr
 # This endpoint handles just the transcription (allows user to review before saving)
 @app.post("/api/transcribe")
 async def transcribe_audio_only(
+    current_user_id: str = Depends(get_current_user),
     file: UploadFile = File(...),
     timezone_offset: str = Form("+00:00"),
     background_tasks: BackgroundTasks = BackgroundTasks()
@@ -329,6 +361,7 @@ async def transcribe_audio_only(
 # This endpoint handles the entire pipeline: audio transcription, embedding generation, and database storage.
 @app.post("/api/memory")
 async def transcribe_and_store_audio(
+    current_user_id: str = Depends(get_current_user),
     background_tasks: BackgroundTasks, 
     file: UploadFile = File(...),
     timezone_offset: str = Form("+00:00")
@@ -370,6 +403,7 @@ async def transcribe_and_store_audio(
 
         # 3. Store into Supabase Table
         data = {
+            "user_id": current_user_id,
             "raw_text": raw_text,
             "embedding": text_embedding,
             "source": "audio"
@@ -380,8 +414,8 @@ async def transcribe_and_store_audio(
         memory_id = response.data[0]["id"]
 
         # Run the LLM extractors in the background
-        background_tasks.add_task(extract_reminders, raw_text, memory_id, timezone_offset)
-        background_tasks.add_task(extract_transactions, raw_text, memory_id)
+        background_tasks.add_task(extract_reminders, raw_text, memory_id, timezone_offset, current_user_id)
+        background_tasks.add_task(extract_transactions, raw_text, memory_id, current_user_id)
         
         return {
             "status": "success",
@@ -395,7 +429,7 @@ async def transcribe_and_store_audio(
 
 # This endpoint takes a natural language query, converts it to a vector, and retrieves relevant memories from Supabase.
 @app.get("/api/search")
-async def search_memories(q: str):
+async def search_memories(q: str, current_user_id: str = Depends(get_current_user)):
     if not q.strip():
         raise HTTPException(status_code=400, detail="Search query cannot be empty.")
         
@@ -420,7 +454,8 @@ async def search_memories(q: str):
             "match_memories",
             {
                 "query_embedding": query_vector,
-                "match_threshold": 0.2,  # Captures relevant matches
+                "match_threshold": 0.2,
+            "filter_user_id": current_user_id,  # Captures relevant matches
                 "match_count": 3         # Return the top 3 most relevant items
             }
         ).execute()
@@ -519,14 +554,14 @@ async def check_and_send_reminders(authorization: str = Header(None)):
 # --- EDIT AND DELETE ENDPOINTS ---
 
 @app.delete("/api/memory/{memory_id}")
-async def delete_memory(memory_id: str):
+async def delete_memory(memory_id: str, current_user_id: str = Depends(get_current_user)):
     try:
         # Delete related extractions to keep ledger clean
         supabase_client.table("reminders").delete().eq("memory_id", memory_id).execute()
         supabase_client.table("transactions").delete().eq("memory_id", memory_id).execute()
         
         # Delete the row where the ID matches
-        response = supabase_client.table("memories").delete().eq("id", memory_id).execute()
+        response = supabase_client.table("memories").delete().eq("user_id", current_user_id).eq("id", memory_id).execute()
         
         # Supabase returns the deleted rows in response.data. If empty, it didn't exist.
         if not response.data:
@@ -540,7 +575,7 @@ class DeleteMemoriesRequest(BaseModel):
     ids: list[str]
 
 @app.delete("/api/memories")
-async def delete_multiple_memories(request: DeleteMemoriesRequest):
+async def delete_multiple_memories(request: DeleteMemoriesRequest, current_user_id: str = Depends(get_current_user)):
     try:
         if not request.ids:
             return {"status": "success", "message": "No memories provided to delete."}
@@ -550,7 +585,7 @@ async def delete_multiple_memories(request: DeleteMemoriesRequest):
         supabase_client.table("transactions").delete().in_("memory_id", request.ids).execute()
         
         # Delete the memories
-        supabase_client.table("memories").delete().in_("id", request.ids).execute()
+        supabase_client.table("memories").delete().eq("user_id", current_user_id).in_("id", request.ids).execute()
             
         return {"status": "success", "message": f"Deleted {len(request.ids)} memories."}
     except Exception as e:
@@ -562,7 +597,7 @@ class UpdateMemoryRequest(BaseModel):
     timezone_offset: str = "+00:00"
 
 @app.put("/api/memory/{memory_id}")
-async def update_memory(memory_id: str, request: UpdateMemoryRequest, background_tasks: BackgroundTasks):
+async def update_memory(memory_id: str, request: UpdateMemoryRequest, background_tasks: BackgroundTasks, current_user_id: str = Depends(get_current_user)):
     raw_text = request.text.strip()
     if not raw_text:
         raise HTTPException(status_code=400, detail="Text cannot be empty.")
@@ -581,10 +616,11 @@ async def update_memory(memory_id: str, request: UpdateMemoryRequest, background
 
         # 2. Update the row in Supabase
         data = {
+            "user_id": current_user_id,
             "raw_text": raw_text,
             "embedding": new_embedding
         }
-        response = supabase_client.table("memories").update(data).eq("id", memory_id).execute()
+        response = supabase_client.table("memories").update(data).eq("user_id", current_user_id).eq("id", memory_id).execute()
         
         if not response.data:
             raise HTTPException(status_code=404, detail="Memory not found.")
@@ -595,8 +631,8 @@ async def update_memory(memory_id: str, request: UpdateMemoryRequest, background
         supabase_client.table("transactions").delete().eq("memory_id", memory_id).execute()
         
         # Re-run extractors in background on the fresh text
-        background_tasks.add_task(extract_reminders, raw_text, memory_id, request.timezone_offset)
-        background_tasks.add_task(extract_transactions, raw_text, memory_id)
+        background_tasks.add_task(extract_reminders, raw_text, memory_id, request.timezone_offset, current_user_id)
+        background_tasks.add_task(extract_transactions, raw_text, memory_id, current_user_id)
 
         return {"status": "success", "message": "Memory updated and extractions resynced."}
     except Exception as e:
@@ -608,13 +644,13 @@ class TextRequest(BaseModel):
     text: str
 
 @app.post("/api/finance/record")
-async def record_transaction(req: TextRequest):
+async def record_transaction(req: TextRequest, current_user_id: str = Depends(get_current_user)):
     """
     Parses unstructured text, calculates totals via LLM reasoning, 
     and saves multiple transactions to the Supabase ledger.
     """
     try:
-        count = await extract_transactions(req.text)
+        count = await extract_transactions(req.text, user_id=current_user_id)
         if count > 0:
             return {"status": "success", "message": f"Successfully recorded {count} transactions."}
         else:
@@ -623,7 +659,7 @@ async def record_transaction(req: TextRequest):
         raise HTTPException(status_code=500, detail=f"Failed to record transaction: {str(e)}")
 
 @app.get("/api/finance/balance")
-async def check_balance(q: str):
+async def check_balance(q: str, current_user_id: str = Depends(get_current_user)):
     """
     Extracts the target person's name using Groq, then relies entirely 
     on the Supabase database to calculate the pinpoint accurate net balance.
@@ -652,7 +688,7 @@ async def check_balance(q: str):
         target_person = completion.choices[0].message.content.strip()
         
         # 2. Let the deterministic Database handle the math with Fuzzy Matching
-        all_transactions = supabase_client.table("transactions").select("*").execute()
+        all_transactions = supabase_client.table("transactions").select("*").eq("user_id", current_user_id).execute()
         
         target_lower = target_person.lower()
         
@@ -696,7 +732,7 @@ async def check_balance(q: str):
 
 
 @app.get("/api/chat")
-async def chat_with_memories(q: str):
+async def chat_with_memories(q: str, current_user_id: str = Depends(get_current_user)):
     if not q:
         raise HTTPException(status_code=400, detail="Query parameter 'q' is required")
 
@@ -718,7 +754,8 @@ async def chat_with_memories(q: str):
             "match_memories",
             {
                 "query_embedding": query_vector,
-                "match_threshold": 0.2, # Lower threshold slightly to catch broad context
+                "match_threshold": 0.2,
+            "filter_user_id": current_user_id, # Lower threshold slightly to catch broad context
                 "match_count": 10
             }
         ).execute()
@@ -802,9 +839,9 @@ async def chat_with_memories(q: str):
 # --- DASHBOARD ENDPOINTS ---
 
 @app.delete("/api/memory/{memory_id}")
-async def delete_memory(memory_id: str):
+async def delete_memory(memory_id: str, current_user_id: str = Depends(get_current_user)):
     try:
-        response = supabase_client.table("memories").delete().eq("id", memory_id).execute()
+        response = supabase_client.table("memories").delete().eq("user_id", current_user_id).eq("id", memory_id).execute()
         return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
@@ -814,12 +851,12 @@ class DeleteMemoriesRequest(BaseModel):
     ids: list[str]
 
 @app.delete("/api/memories")
-async def delete_multiple_memories(request: DeleteMemoriesRequest):
+async def delete_multiple_memories(request: DeleteMemoriesRequest, current_user_id: str = Depends(get_current_user)):
     try:
         if not request.ids:
             return {"status": "success"}
         # Supabase in filter accepts a list of values
-        response = supabase_client.table("memories").delete().in_("id", request.ids).execute()
+        response = supabase_client.table("memories").delete().eq("user_id", current_user_id).in_("id", request.ids).execute()
         return {"status": "success", "deleted_count": len(response.data) if response.data else 0}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
@@ -828,17 +865,17 @@ class StarMemoryRequest(BaseModel):
     is_starred: bool
 
 @app.put("/api/memory/{memory_id}/star")
-async def toggle_star_memory(memory_id: str, request: StarMemoryRequest):
+async def toggle_star_memory(memory_id: str, request: StarMemoryRequest, current_user_id: str = Depends(get_current_user)):
     try:
-        response = supabase_client.table("memories").update({"is_starred": request.is_starred}).eq("id", memory_id).execute()
+        response = supabase_client.table("memories").update({"is_starred": request.is_starred}).eq("user_id", current_user_id).eq("id", memory_id).execute()
         return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
 
 @app.get("/api/reminders")
-async def get_all_reminders():
+async def get_all_reminders(current_user_id: str = Depends(get_current_user)):
     try:
-        response = supabase_client.table("reminders").select("*").order("due_datetime", desc=False).execute()
+        response = supabase_client.table("reminders").select("*").eq("user_id", current_user_id).order("due_datetime", desc=False).execute()
         return response.data
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
@@ -848,8 +885,9 @@ class UpdateReminderRequest(BaseModel):
     is_completed: bool | None = None
 
 @app.put("/api/reminders/{reminder_id}")
-async def update_reminder_status(reminder_id: str, request: UpdateReminderRequest):
-    update_data = {}
+async def update_reminder_status(reminder_id: str, request: UpdateReminderRequest, current_user_id: str = Depends(get_current_user)):
+    update_data = {
+            "user_id": current_user_id,}
     if request.status is not None:
         update_data["status"] = request.status
     if request.is_completed is not None:
@@ -857,7 +895,7 @@ async def update_reminder_status(reminder_id: str, request: UpdateReminderReques
         
     try:
         if update_data:
-            response = supabase_client.table("reminders").update(update_data).eq("id", reminder_id).execute()
+            response = supabase_client.table("reminders").update(update_data).eq("user_id", current_user_id).eq("id", reminder_id).execute()
             if not response.data:
                 raise HTTPException(status_code=404, detail="Reminder not found.")
         return {"status": "success", "message": "Reminder updated."}
@@ -865,9 +903,9 @@ async def update_reminder_status(reminder_id: str, request: UpdateReminderReques
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
 
 @app.get("/api/transactions")
-async def get_all_transactions():
+async def get_all_transactions(current_user_id: str = Depends(get_current_user)):
     try:
-        response = supabase_client.table("transactions").select("*").order("created_at", desc=True).execute()
+        response = supabase_client.table("transactions").select("*").eq("user_id", current_user_id).order("created_at", desc=True).execute()
         return response.data
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
@@ -876,12 +914,12 @@ class FCMTokenRequest(BaseModel):
     token: str
 
 @app.post("/api/fcm-token")
-async def register_fcm_token(req: FCMTokenRequest):
+async def register_fcm_token(req: FCMTokenRequest, current_user_id: str = Depends(get_current_user)):
     try:
         # Upsert the token (if it exists, do nothing or update)
-        response = supabase_client.table("fcm_tokens").select("*").eq("token", req.token).execute()
+        response = supabase_client.table("fcm_tokens").select("*").eq("user_id", current_user_id).eq("token", req.token).execute()
         if not response.data:
-            supabase_client.table("fcm_tokens").insert({"token": req.token}).execute()
+            supabase_client.table("fcm_tokens").insert({"token": req.token, "user_id": current_user_id}).execute()
         return {"status": "success", "message": "FCM token registered"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
