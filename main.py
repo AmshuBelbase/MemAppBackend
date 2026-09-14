@@ -837,11 +837,23 @@ async def check_balance(q: str, current_user_id: str = Depends(get_current_user)
 
 
 @app.get("/api/chat")
-async def chat_with_memories(q: str, current_user_id: str = Depends(get_current_user)):
+async def chat_with_memories(q: str, timezone_offset: str = "+00:00", current_user_id: str = Depends(get_current_user)):
     if not q:
         raise HTTPException(status_code=400, detail="Query parameter 'q' is required")
 
     try:
+        # Parse the offset (e.g., "+05:30" or "-04:00")
+        offset_hours = 0
+        offset_minutes = 0
+        try:
+            sign = 1 if timezone_offset[0] == '+' else -1
+            parts = timezone_offset[1:].split(':')
+            offset_hours = sign * int(parts[0])
+            offset_minutes = sign * int(parts[1]) if len(parts) > 1 else 0
+        except:
+            pass
+        user_tz = timezone(timedelta(hours=offset_hours, minutes=offset_minutes))
+
         # 1. Convert the natural language question into a vector using the new GenAI SDK
         query_result = genai_client.models.embed_content(
             model="gemini-embedding-001",
@@ -853,41 +865,61 @@ async def chat_with_memories(q: str, current_user_id: str = Depends(get_current_
         )
         query_vector = query_result.embeddings[0].values
 
-        # 2. Search Supabase for the top 10 most relevant memories matching the query
-        # We increase the count to 10 so the LLM gets historical depth for math tracking
-        response = supabase_client.rpc(
+        # 2. Search Supabase for the top 30 most relevant memories matching the query
+        semantic_response = supabase_client.rpc(
             "match_memories",
             {
                 "query_embedding": query_vector,
                 "match_threshold": 0.2,
-            "filter_user_id": current_user_id, # Lower threshold slightly to catch broad context
-                "match_count": 10
+                "filter_user_id": current_user_id,
+                "match_count": 30
             }
         ).execute()
-
-        retrieved_notes = response.data
+        semantic_notes = semantic_response.data or []
         
-        # 3. Format the retrieved memories into a structured context string for the LLM
+        # 3. Fetch the top 30 most recent memories for chronological context
+        recent_response = supabase_client.table("memories").select("id, raw_text, created_at").eq("user_id", current_user_id).order("created_at", desc=True).limit(30).execute()
+        recent_notes = recent_response.data or []
+        
+        # Merge and deduplicate by ID
+        unique_notes = {}
+        for note in semantic_notes + recent_notes:
+            unique_notes[note["id"]] = note
+            
+        retrieved_notes = list(unique_notes.values())
+        
+        # 4. Format the retrieved memories into a structured context string for the LLM
         context_text = ""
         for index, note in enumerate(retrieved_notes):
-            context_text += f"Memory [{index + 1}]: {note['raw_text']}\n"
+            # parse the ISO date if possible for better formatting, or just use it directly
+            dt_str = note.get("created_at", "Unknown")
+            try:
+                dt = datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
+                dt_local = dt.astimezone(user_tz)
+                dt_str = dt_local.strftime("%Y-%m-%d %H:%M")
+            except:
+                pass
+            context_text += f"Memory [{index + 1}] | Created: {dt_str} | {note.get('raw_text', '')}\n"
+
+        current_datetime = datetime.now(user_tz).strftime("%Y-%m-%d %H:%M Local Time")
 
         system_prompt = f"""
-        You are the reasoning core of MemApp, a personal cognitive assistant. 
-        Your objective is to answer the user's question about their transactions using only the verified facts inside the provided context.
+        You are the reasoning core of MemApp, a smart personal cognitive assistant.
+        The current date and time is: {current_datetime}.
+
+        Your objective is to answer the user's question accurately using ONLY the verified facts inside the provided context.
         
-        Strict Calculation Rules (Process Internally):
-        - Sum up all transactions involving the person mentioned.
-        - Anything I paid/lent counts as positive (+). Anything they paid/returned counts as negative (-).
-        - Compute the final net total carefully.
+        General Instructions:
+        - If the user asks for a time-based summary (e.g., "this week", "today", "recent", "pending tasks"), strictly filter the provided memories using their 'Created' dates. Ignore anything outside that timeframe.
+        - If the user asks about pending tasks or general summaries, simply list them out naturally and concisely.
+        - Do not use overly robotic language. Do NOT mention that you are an AI or reading from a context block.
         
-        Formatting Rules (Mandatory):
-        - DO NOT output step-by-step rules, numbers, headers, or bullet points. 
-        - Keep the vocabulary extremely simple, direct, and conversational.
-        - State clearly what each party did, followed by the exact net result.
-        
-        Example Output Style:
-        "Siddharth gave you 50. You gave him 200. Siddharth paid you 100. So now he has to give you 500 only."
+        Financial & Split Instructions (ONLY IF APPLICABLE):
+        - If the user asks about financial splits, balances, or who owes whom, apply strict ledger rules:
+          * Sum up all transactions involving the person mentioned.
+          * Anything the user paid/lent counts as positive (+). Anything the other person paid/returned counts as negative (-).
+          * Compute the final net total carefully.
+          * Example Output Style: "Siddhant gave you 50. You gave him 200. Siddhant paid you 100. So now he has to give you 500 only."
         
         Retrieved Memories Context:
         \"\"\"
