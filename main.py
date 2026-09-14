@@ -16,6 +16,7 @@ from supabase import create_client, Client
 from google import genai
 from google.genai import types
 import json
+import secrets
 from fastapi import Header
 from datetime import datetime, timedelta, timezone
 from pydantic import BaseModel
@@ -971,80 +972,56 @@ class EmailData(BaseModel):
 class UserData(BaseModel):
     id: str
     email: str
+
+class OTPRequest(BaseModel):
+    email: str
+    password: str
+    name: str
+
+class OTPVerify(BaseModel):
+    email: str
+    otp: str
+
+@app.post("/api/auth/request-otp")
+async def request_otp(payload: OTPRequest):
+    email = payload.email.strip().lower()
     
-class SupabaseWebhookPayload(BaseModel):
-    user: UserData
-    email_data: EmailData
-
-@app.post("/api/auth/send-email")
-async def send_auth_email(request: Request):
-    # 1. Verify Webhook Signature (Standard Webhooks)
-    secret = os.getenv("SUPABASE_WEBHOOK_SECRET")
-    if secret:
-        # standardwebhooks expects the secret to NOT have the v1,whsec_ prefix sometimes, 
-        # but Supabase generates it with the prefix. standardwebhooks handles it.
-        headers = request.headers
-        payload_body = await request.body()
-        try:
-            wh = Webhook(secret)
-            wh.verify(payload_body, dict(headers))
-            print("Webhook signature verified successfully.")
-        except Exception as e:
-            print(f"WEBHOOK SIGNATURE VERIFICATION FAILED: {str(e)}")
-            print(f"Headers received: {dict(headers)}")
-            # We will raise 400 here eventually, but let's just log it for debugging
-            # raise HTTPException(status_code=400, detail=f"Invalid webhook signature: {str(e)}")
-
-    # 2. Parse Payload
+    # 1. Generate 6 digit OTP
+    otp_code = "".join([str(secrets.randbelow(10)) for _ in range(6)])
+    
+    # 2. Expiration (10 mins)
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    
+    # 3. Save to pending_signups table (Upsert in case they request again)
     try:
-        data = await request.json()
-        payload = SupabaseWebhookPayload(**data)
-        
-        email = payload.user.email
-        action_type = payload.email_data.email_action_type
-        token = payload.email_data.token
+        supabase_admin.table("pending_signups").upsert({
+            "email": email,
+            "name": payload.name,
+            "password": payload.password,
+            "otp": otp_code,
+            "expires_at": expires_at.isoformat()
+        }).execute()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save pending signup: {str(e)}")
 
-        subject = "Your Voice Memory Verification Code"
+    # 4. Send Email via SMTP
+    try:
+        smtp_email = os.getenv("SMTP_EMAIL")
+        smtp_password = os.getenv("SMTP_PASSWORD")
+        if not smtp_email or not smtp_password:
+            raise HTTPException(status_code=500, detail="SMTP server not configured")
+
+        subject = "Your MemApp Verification Code"
         html_content = f"""
         <div style="font-family: sans-serif; padding: 20px; text-align: center;">
             <h2 style="color: #6750A4;">Welcome to MemApp!</h2>
             <p>Please use the following 6-digit code to verify your email address:</p>
             <div style="margin: 20px auto; padding: 15px; background-color: #f4f4f5; border-radius: 8px; font-size: 28px; font-weight: bold; color: #6750A4; letter-spacing: 4px; display: inline-block;">
-                {token}
+                {otp_code}
             </div>
+            <p>This code expires in 10 minutes.</p>
         </div>
         """
-
-        if action_type == "recovery":
-            subject = "Reset your password"
-            html_content = f"""
-            <div style="font-family: sans-serif; padding: 20px; text-align: center;">
-                <h2 style="color: #6750A4;">Password Reset</h2>
-                <p>Please use the following 6-digit code to reset your password:</p>
-                <div style="margin: 20px auto; padding: 15px; background-color: #f4f4f5; border-radius: 8px; font-size: 28px; font-weight: bold; color: #6750A4; letter-spacing: 4px; display: inline-block;">
-                    {token}
-                </div>
-            </div>
-            """
-        elif action_type == "email_change":
-            subject = "Confirm your new email"
-            html_content = f"""
-            <div style="font-family: sans-serif; padding: 20px; text-align: center;">
-                <h2 style="color: #6750A4;">Email Change</h2>
-                <p>Please use the following 6-digit code to confirm your new email:</p>
-                <div style="margin: 20px auto; padding: 15px; background-color: #f4f4f5; border-radius: 8px; font-size: 28px; font-weight: bold; color: #6750A4; letter-spacing: 4px; display: inline-block;">
-                    {token}
-                </div>
-            </div>
-            """
-
-        # Send via Python SMTP (e.g., Gmail)
-        smtp_email = os.getenv("SMTP_EMAIL")
-        smtp_password = os.getenv("SMTP_PASSWORD")
-        
-        if not smtp_email or not smtp_password:
-            print("ERROR: SMTP_EMAIL or SMTP_PASSWORD is not set in .env")
-            return {}
 
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
@@ -1060,12 +1037,50 @@ async def send_auth_email(request: Request):
         server.sendmail(smtp_email, email, msg.as_string())
         server.quit()
         
-        print(f"[{action_type}] Successfully sent SMTP email to {email}")
-        return {}
+        return {"status": "success", "message": "OTP sent to email"}
     except Exception as e:
-        print(f"FAILED TO PROCESS WEBHOOK: {str(e)}")
-        # Still return {} to prevent Supabase from repeatedly failing the user signup
-        return {}
+        raise HTTPException(status_code=500, detail=f"Failed to send email: {str(e)}")
+
+
+@app.post("/api/auth/verify-otp")
+async def verify_otp(payload: OTPVerify):
+    email = payload.email.strip().lower()
+    otp_code = payload.otp.strip()
+
+    # 1. Fetch pending signup
+    response = supabase_admin.table("pending_signups").select("*").eq("email", email).execute()
+    data = response.data
+    
+    if not data:
+        raise HTTPException(status_code=400, detail="No pending signup found for this email. Please sign up again.")
+        
+    pending = data[0]
+    
+    # 2. Check Expiration
+    expires_at = datetime.fromisoformat(pending["expires_at"].replace('Z', '+00:00'))
+    if datetime.now(timezone.utc) > expires_at:
+        supabase_admin.table("pending_signups").delete().eq("email", email).execute()
+        raise HTTPException(status_code=400, detail="OTP has expired. Please sign up again.")
+
+    # 3. Check OTP
+    if pending["otp"] != otp_code:
+        raise HTTPException(status_code=400, detail="Invalid OTP code.")
+
+    # 4. Success! Create User in Supabase Auth securely bypassing confirm email
+    try:
+        new_user = supabase_admin.auth.admin.create_user({
+            "email": email,
+            "password": pending["password"],
+            "email_confirm": True, # Automatically marks them as confirmed!
+            "user_metadata": {"name": pending["name"]}
+        })
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to create user in Supabase: {str(e)}")
+
+    # 5. Clean up pending signups
+    supabase_admin.table("pending_signups").delete().eq("email", email).execute()
+
+    return {"status": "success", "message": "Email verified and user registered."}
 
 @app.post("/api/fcm-token")
 async def register_fcm_token(req: FCMTokenRequest, current_user_id: str = Depends(get_current_user)):
