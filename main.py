@@ -18,7 +18,6 @@ from google.genai import types
 import json
 from fastapi import Header
 from datetime import datetime, timedelta, timezone
-import resend
 from pydantic import BaseModel
 
 # Load environment variables from .env
@@ -62,12 +61,15 @@ app.add_middleware(
 
 # Initialize API Clients
 groq_client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY"))
-resend.api_key = os.environ.get("RESEND_API_KEY")
 genai_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 supabase_url = os.environ.get("SUPABASE_URL")
 supabase_key = os.environ.get("SUPABASE_KEY")
 supabase_client: Client = create_client(supabase_url, supabase_key)
+
+# Admin client is required to fetch user emails and bypass RLS during cron execution
+supabase_service_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", supabase_key) 
+supabase_admin: Client = create_client(supabase_url, supabase_service_key)
 
 import firebase_admin
 from firebase_admin import credentials, messaging
@@ -486,9 +488,9 @@ async def check_and_send_reminders(authorization: str = Header(None)):
         now_utc = datetime.now(timezone.utc)
         time_window = now_utc + timedelta(minutes=60)
         
-        # 3. Query Supabase for pending reminders within this window
-        response = supabase_client.table("reminders") \
-            .select("*") \
+        # 3. Query Supabase for pending reminders within this window using the admin client (bypasses RLS)
+        response = supabase_admin.table("reminders") \
+            .select("*, memories(user_id)") \
             .eq("status", "pending") \
             .lte("due_datetime", time_window.isoformat()) \
             .execute()
@@ -498,57 +500,99 @@ async def check_and_send_reminders(authorization: str = Header(None)):
         if not due_tasks:
             return {"status": "success", "message": "No pending tasks in the upcoming window."}
 
-        sent_count = 0
+        # Group tasks by user_id
+        from collections import defaultdict
+        grouped_tasks = defaultdict(list)
         for task in due_tasks:
-            
-            # Format the time nicely for the email
-            # Converting the UTC ISO string back to a readable format
-            dt_obj = datetime.fromisoformat(task['due_datetime'].replace('Z', '+00:00'))
-            readable_time = dt_obj.strftime("%B %d, %Y at %I:%M %p (UTC)")
+            memory_data = task.get("memories")
+            user_id = memory_data.get("user_id") if memory_data else None
+            if user_id:
+                grouped_tasks[user_id].append(task)
+            else:
+                print(f"Skipping task {task['id']} - no associated user_id found.")
 
-            # Send the email via Resend
+        sent_count = 0
+        for user_id, tasks in grouped_tasks.items():
+            
+            # Fetch the user's actual email address securely via Admin Auth API
             try:
-                email_response = resend.Emails.send({
-                    "from": "MemApp AI <onboarding@resend.dev>", # Resend's free testing address
-                    "to": "amsubelbs@gmail.com",       # <--- CHANGE THIS TO YOUR EMAIL
-                    "subject": f"Reminder: {task['task_name']}",
-                    "html": f"""
+                user_record = supabase_admin.auth.admin.get_user_by_id(user_id)
+                user_email = user_record.user.email
+            except Exception as e:
+                print(f"Failed to fetch email for user {user_id}: {e}")
+                continue
+            
+            # Build HTML for all tasks
+            tasks_html = ""
+            for task in tasks:
+                dt_obj = datetime.fromisoformat(task['due_datetime'].replace('Z', '+00:00'))
+                readable_time = dt_obj.strftime("%B %d, %Y at %I:%M %p (UTC)")
+                tasks_html += f"""
+                    <div style="margin-bottom: 15px; padding: 10px; border-left: 4px solid #6750A4; background-color: #f8f9fa;">
+                        <p style="margin: 0 0 5px 0;"><strong>Task:</strong> {task['task_name']}</p>
+                        <p style="margin: 0; color: #555;"><strong>Due:</strong> {readable_time}</p>
+                    </div>
+                """
+
+            # Send the email via SMTP (e.g. Gmail)
+            try:
+                smtp_email = os.getenv("SMTP_EMAIL")
+                smtp_password = os.getenv("SMTP_PASSWORD")
+                
+                if smtp_email and smtp_password and user_email:
+                    msg = MIMEMultipart("alternative")
+                    subject_prefix = "Reminders" if len(tasks) > 1 else "Reminder"
+                    msg["Subject"] = f"{subject_prefix}: {len(tasks)} upcoming task(s)"
+                    msg["From"] = f"Voice Memory Hub <{smtp_email}>"
+                    msg["To"] = user_email
+
+                    html_content = f"""
                     <div style="font-family: sans-serif; padding: 20px;">
-                        <h2>🔔 Upcoming Memory Reminder</h2>
-                        <p><strong>Task:</strong> {task['task_name']}</p>
-                        <p><strong>Due:</strong> {readable_time}</p>
+                        <h2>🔔 You have {len(tasks)} upcoming reminder(s)</h2>
+                        {tasks_html}
                         <hr>
                         <p style="color: gray; font-size: 12px;">Sent automatically by your Voice Memory Hub</p>
                     </div>
                     """
-                })
-                print(f"Email sent successfully! ID: {email_response['id']}")
+                    
+                    part = MIMEText(html_content, "html")
+                    msg.attach(part)
+
+                    server = smtplib.SMTP("smtp.gmail.com", 587)
+                    server.starttls()
+                    server.login(smtp_email, smtp_password)
+                    # Use user_email for the actual recipient
+                    server.sendmail(smtp_email, user_email, msg.as_string())
+                    server.quit()
+                    print(f"Reminder email sent successfully to {user_email}!")
+                else:
+                    print("SMTP_EMAIL or SMTP_PASSWORD not set. Skipping email reminder.")
             except Exception as email_err:
                 print(f"Failed to send email: {email_err}")
 
-            # Send Push Notification via FCM
+            # Send Push Notification via FCM (separately for each task)
             try:
-                tokens_resp = supabase_client.table("fcm_tokens").select("token").execute()
-                for t in tokens_resp.data:
-                    message = messaging.Message(
-                        notification=messaging.Notification(
-                            title=f"Reminder: {task['task_name']}",
-                            body=f"Due at {readable_time}"
-                        ),
-                        token=t['token']
-                    )
-                    messaging.send(message)
-                    print(f"FCM Push sent to token {t['token'][:10]}...")
-            except Exception as fcm_err:
-                print(f"Failed to send FCM push: {fcm_err}")
-
-            # Mark the task as 'sent'
-            supabase_client.table("reminders") \
-                .update({"status": "sent"}) \
-                .eq("id", task["id"]) \
-                .execute()
+                tokens_resp = supabase_admin.table("fcm_tokens").select("token").eq("user_id", user_id).execute()
+                if tokens_resp.data:
+                    for task in tasks:
+                        task_time = datetime.fromisoformat(task['due_datetime'].replace('Z', '+00:00')).strftime('%I:%M %p')
+                        for t in tokens_resp.data:
+                            message = messaging.Message(
+                                notification=messaging.Notification(
+                                    title=f"Reminder: {task['task_name']}",
+                                    body=f"Due at {task_time}"
+                                ),
+                                token=t["token"],
+                            )
+                            messaging.send(message)
+                    print(f"Sent {len(tasks)} separate push notifications successfully to user {user_id}")
+            except Exception as push_err:
+                print(f"Failed to send push notification: {push_err}")
                 
-            sent_count += 1
+            # 4. Update the reminder status to 'sent'
+            for task in tasks:
+                supabase_admin.table("reminders").update({"status": "sent"}).eq("id", task["id"]).execute()
+                sent_count += 1
             
         return {"status": "success", "notifications_sent": sent_count}
         
