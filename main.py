@@ -852,6 +852,7 @@ async def check_and_send_reminders(authorization: str = Header(None)):
                                         title=notif_title,
                                         body=notif_body,
                                     ),
+                                    data={"screen": "reminders"},
                                     token=t["token"],
                                 )
                                 messaging.send(message)
