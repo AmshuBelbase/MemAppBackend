@@ -1035,7 +1035,7 @@ async def request_otp(payload: OTPRequest):
         part = MIMEText(html_content, "html")
         msg.attach(part)
 
-        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server = smtplib.SMTP("smtp.gmail.com", 587, timeout=10)
         server.starttls()
         server.login(smtp_email, smtp_password)
         server.sendmail(smtp_email, email, msg.as_string())
