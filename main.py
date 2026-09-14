@@ -206,6 +206,11 @@ async def extract_transactions(text: str, memory_id: str = None, user_id: str = 
     2. "income": Personal income (e.g., salary, cashback, money entering your wallet).
     3. "split": Shared expense/debt with someone else.
     
+    CRITICAL RULE FOR PAYING FOR OTHERS: 
+    If the user states they bought something FOR someone else (e.g., "I paid 500 for John for his grocery"), you MUST extract TWO separate transactions:
+    - An "expense" transaction (because the user's money left their wallet).
+    - A "split" transaction (where the other person is the "debtor" and "Self" is the "creditor").
+    
     Assume the user speaking is named "Self".
     Calculate the total amounts if quantities and unit prices are given.
     
