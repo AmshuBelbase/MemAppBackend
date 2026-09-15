@@ -221,9 +221,9 @@ async def extract_transactions(text: str, memory_id: str = None, user_id: str = 
     You are a precise financial extraction AI. Analyze the user's text and extract the financial details.
     
     You must classify each item as one or multiple of these three types:
-    1. "expense": Personal spending (money leaving your wallet).
-    2. "income": Personal income (e.g., salary, cashback, money entering your wallet).
-    3. "split": Shared expense/debt with someone else.
+    1. "expense": ONLY the user's personal share of consumption (e.g. what the user actually ate/used/kept). This is strictly the value consumed by the user, regardless of who paid for it.
+    2. "income": ONLY true personal income (e.g., salary, cashback, monetary gifts received). Receiving money to settle a debt is NOT income.
+    3. "split": ANY transfer of value between the user and someone else that creates or settles a debt.
     
     Assume the user speaking is named "Self".
     Calculate the total amounts if quantities and unit prices are given.
@@ -239,7 +239,7 @@ async def extract_transactions(text: str, memory_id: str = None, user_id: str = 
     - "category": Choose from: {', '.join(categories)}.
     
     If "transaction_type" is "split", add:
-    - "creditor": The ONE person owed money (usually "Self"). Format as Title Case.
+    - "creditor": The ONE person owed money (usually "Self" if someone owes the user, or the other person's name if the user owes them). Format as Title Case.
     - "debtor": The ONE person who owes money. Format as Title Case.
     - CRITICAL SCHEMA RULE: "creditor" and "debtor" must NEVER contain multiple names (e.g., "sara and priya" is strictly invalid). You must create separate split objects for each person.
     
@@ -248,118 +248,116 @@ async def extract_transactions(text: str, memory_id: str = None, user_id: str = 
     - If the text mentions a name that is phonetically similar to a name on this list (e.g., "sara" -> "sarah"), map it to the exact spelling in the list.
     - EXCEPTION: If the user explicitly provides a last name or qualifier to distinguish someone (e.g., "priya Sharma" when only "priya" is known), treat them as a NEW distinct person and output their full name. Do not over-correct if they are clearly specifying a different person.
     
-    EXAMPLES OF ALL 15 POSSIBLE SCENARIOS (FOLLOW THIS EXACT MAPPING LOGIC):
+    EXAMPLES OF ALL 17 POSSIBLE SCENARIOS (FOLLOW THIS EXACT MAPPING LOGIC):
     
-    1. Money leaves user's wallet for user only (personal expense)
+    1. User pays for their own consumption
     Input: "I spent 100 on coffee"
     Output: {{"transactions": [{{"transaction_type": "expense", "amount": 100, "currency": "INR", "description": "Coffee", "category": "Food & Groceries"}}]}}
 
-    2. Money leaves user's wallet to send to someone else (lending/paying back)
+    2. User lends money / pays for someone else (User does not consume)
     Input: "I lent 500 to John"
     Output: {{"transactions": [
-      {{"transaction_type": "expense", "amount": 500, "currency": "INR", "description": "Lent to John", "category": "Others"}},
       {{"transaction_type": "split", "creditor": "Self", "debtor": "John", "amount": 500, "currency": "INR", "description": "Loan"}}
     ]}}
 
-    3. Money leaves user's wallet for someone else (expense for others, user excluded)
-    Input: "I bought a 500rs gift for Sarah"
+    3. User pays for someone else (expense for others, user excluded)
+    Input: "I bought a 500rs saree for Sarah"
     Output: {{"transactions": [
-      {{"transaction_type": "expense", "amount": 500, "currency": "INR", "description": "Gift for Sarah", "category": "Others"}},
-      {{"transaction_type": "split", "creditor": "Self", "debtor": "Sarah", "amount": 500, "currency": "INR", "description": "Gift"}}
+      {{"transaction_type": "split", "creditor": "Self", "debtor": "Sarah", "amount": 500, "currency": "INR", "description": "saree for sarah"}}
     ]}}
 
-    4. Money leaves user's wallet for someone else and user (expense with others, user included)
+    4. User pays for themselves and someone else
     Input: "I paid 1000 for dinner for me and Alice"
     Output: {{"transactions": [
-      {{"transaction_type": "expense", "amount": 1000, "currency": "INR", "description": "Dinner with Alice", "category": "Food & Groceries"}},
-      {{"transaction_type": "split", "creditor": "Self", "debtor": "Alice", "amount": 500, "currency": "INR", "description": "Dinner share"}}
+      {{"transaction_type": "expense", "amount": 500, "currency": "INR", "description": "My dinner share", "category": "Food & Groceries"}},
+      {{"transaction_type": "split", "creditor": "Self", "debtor": "Alice", "amount": 500, "currency": "INR", "description": "Alice's dinner share"}}
     ]}}
 
-    5. Money leaves user's wallet for a group, user excluded
+    5. User pays for a group (User not included)
     Input: "I bought 3 tickets for Bob, Charlie, and Dave for 900"
     Output: {{"transactions": [
-      {{"transaction_type": "expense", "amount": 900, "currency": "INR", "description": "Tickets for group", "category": "Entertainment"}},
       {{"transaction_type": "split", "creditor": "Self", "debtor": "Bob", "amount": 300, "currency": "INR", "description": "Ticket"}},
       {{"transaction_type": "split", "creditor": "Self", "debtor": "Charlie", "amount": 300, "currency": "INR", "description": "Ticket"}},
       {{"transaction_type": "split", "creditor": "Self", "debtor": "Dave", "amount": 300, "currency": "INR", "description": "Ticket"}}
     ]}}
 
-    6. Money leaves user's wallet for a group, user included
+    6. User pays for a group (User included)
     Input: "I bought 3 bags for me, sara and priya for 1200 total"
     Output: {{"transactions": [
-      {{"transaction_type": "expense", "amount": 1200, "currency": "INR", "description": "3 bags", "category": "Online Shopping"}},
-      {{"transaction_type": "split", "creditor": "Self", "debtor": "sara", "amount": 400, "currency": "INR", "description": "Bag"}},
-      {{"transaction_type": "split", "creditor": "Self", "debtor": "priya", "amount": 400, "currency": "INR", "description": "Bag"}}
+      {{"transaction_type": "expense", "amount": 400, "currency": "INR", "description": "My bag's share", "category": "Online Shopping"}},
+      {{"transaction_type": "split", "creditor": "Self", "debtor": "sara", "amount": 400, "currency": "INR", "description": "sara's Bag share"}},
+      {{"transaction_type": "split", "creditor": "Self", "debtor": "priya", "amount": 400, "currency": "INR", "description": "priya's Bag share"}}
     ]}}
 
-    7. Money does not leave wallet (expense by someone else, they are included, user included)
+    7. Someone else pays for them and the User
     Input: "Bob bought movie tickets for both of us, total 600"
     Output: {{"transactions": [
+      {{"transaction_type": "expense", "amount": 300, "currency": "INR", "description": "My movie ticket", "category": "Entertainment"}},
       {{"transaction_type": "split", "creditor": "Bob", "debtor": "Self", "amount": 300, "currency": "INR", "description": "Movie ticket"}}
     ]}}
 
-    8. Money does not leave wallet (expense by someone else, they are excluded, user included)
+    8. Someone else pays for the User only
     Input: "Alice bought a 200rs book for me"
     Output: {{"transactions": [
+      {{"transaction_type": "expense", "amount": 200, "currency": "INR", "description": "Book", "category": "Others"}},
       {{"transaction_type": "split", "creditor": "Alice", "debtor": "Self", "amount": 200, "currency": "INR", "description": "Book"}}
     ]}}
 
-    9. Money does not leave wallet (expense by someone else with a group, they are included, user included)
+    9. Someone else pays for a group (User included)
     Input: "John paid 1500 for dinner for him, me, and Sarah"
     Output: {{"transactions": [
+      {{"transaction_type": "expense", "amount": 500, "currency": "INR", "description": "My dinner share", "category": "Food & Groceries"}},
       {{"transaction_type": "split", "creditor": "John", "debtor": "Self", "amount": 500, "currency": "INR", "description": "Dinner share"}}
     ]}}
 
-    10. Money does not leave wallet (expense by someone else for a group, they are excluded, user included)
+    10. Someone else pays for a group (They are excluded, User included)
     Input: "Dad bought 3 tickets for me, Tom, and Jerry for 900"
     Output: {{"transactions": [
+      {{"transaction_type": "expense", "amount": 300, "currency": "INR", "description": "My ticket", "category": "Entertainment"}},
       {{"transaction_type": "split", "creditor": "Dad", "debtor": "Self", "amount": 300, "currency": "INR", "description": "Ticket"}}
     ]}}
 
-    11. Money enters user's wallet when no other person is linked (personal income)
+    11. Personal Income (No debt involved, eg, salary, cashbacks, monetary gifts received)
     Input: "I received my salary of 50000"
     Output: {{"transactions": [
       {{"transaction_type": "income", "amount": 50000, "currency": "INR", "description": "Salary", "category": "Income"}}
     ]}}
 
-    12. Money enters user's wallet upon receiving from someone else (borrowing / receiving back)
-    Input: "Sarah paid me back 200"
+    12. Receiving payback / Debt settlement (Not income)
+    Input: "Sarah paid me 200"
     Output: {{"transactions": [
-      {{"transaction_type": "income", "amount": 200, "currency": "INR", "description": "Sarah paid back", "category": "Income"}},
-      {{"transaction_type": "split", "creditor": "Sarah", "debtor": "Self", "amount": 200, "currency": "INR", "description": "Payback"}}
+      {{"transaction_type": "split", "creditor": "Sarah", "debtor": "Self", "amount": 200, "currency": "INR", "description": "Payback from Sarah"}}
     ]}}
 
-    13. Money enters user's wallet because someone sent or paid him (inflow from someone else)
-    Input: "Dad sent me 1000"
+    13. Receiving money / Borrowing (Creates a debt)
+    Input: "I borrowed 1000 from Dad"
     Output: {{"transactions": [
-      {{"transaction_type": "income", "amount": 1000, "currency": "INR", "description": "Money from Dad", "category": "Income"}},
-      {{"transaction_type": "split", "creditor": "Dad", "debtor": "Self", "amount": 1000, "currency": "INR", "description": "Received money"}}
+      {{"transaction_type": "split", "creditor": "Dad", "debtor": "Self", "amount": 1000, "currency": "INR", "description": "Received money from Dad"}}
     ]}}
 
-    14. Money enters user's wallet because more than 1 person sent or paid him (inflow from multiple people)
-    Input: "Bob and Alice each sent me 500"
+    14. Settlement from multiple people
+    Input: "Bob and Alice each paid me 500"
     Output: {{"transactions": [
-      {{"transaction_type": "income", "amount": 1000, "currency": "INR", "description": "Money from Bob and Alice", "category": "Income"}},
-      {{"transaction_type": "split", "creditor": "Bob", "debtor": "Self", "amount": 500, "currency": "INR", "description": "Received money"}},
-      {{"transaction_type": "split", "creditor": "Alice", "debtor": "Self", "amount": 500, "currency": "INR", "description": "Received money"}}
+      {{"transaction_type": "split", "creditor": "Bob", "debtor": "Self", "amount": 500, "currency": "INR", "description": "Payback from Bob"}},
+      {{"transaction_type": "split", "creditor": "Alice", "debtor": "Self", "amount": 500, "currency": "INR", "description": "Payback from Alice"}}
     ]}}
 
-    15. User not concerned with the transaction (Third-Party Ignore)
+    15. Third-Party Ignore (Does not involve Self)
     Input: "Bob paid 500 to Alice"
     Output: {{"transactions": []}}
     
     16. Unequal Splits (Explicitly stated)
     Input: "I paid 1000 for dinner for me and John, but John's share was 700."
     Output: {{"transactions": [
-      {{"transaction_type": "expense", "amount": 1000, "currency": "INR", "description": "Dinner with John", "category": "Food & Groceries"}},
+      {{"transaction_type": "expense", "amount": 300, "currency": "INR", "description": "My dinner share", "category": "Food & Groceries"}},
       {{"transaction_type": "split", "creditor": "Self", "debtor": "John", "amount": 700, "currency": "INR", "description": "Dinner share"}}
     ]}}
 
     17. Multi-Payer Scenarios
     Input: "The bill was 1000. I paid 400 and Sarah paid 600. It was for me, Sarah, and Bob."
     Output: {{"transactions": [
-      {{"transaction_type": "expense", "amount": 400, "currency": "INR", "description": "Bill share", "category": "Others"}},
-      {{"transaction_type": "split", "creditor": "Self", "debtor": "Bob", "amount": 66.67, "currency": "INR", "description": "Bill share"}}
+      {{"transaction_type": "expense", "amount": 333.33, "currency": "INR", "description": "My bill share", "category": "Others"}},
+      {{"transaction_type": "split", "creditor": "Self", "debtor": "Bob", "amount": 66.67, "currency": "INR", "description": "Bob's share to me"}}
     ]}}
     
     NOTE: These 17 examples cover the core foundations of accounting. If a user provides a complex or hidden edge case that does not perfectly match one of these, you must logically interpolate these rules to generate the correct transaction math from the perspective of "Self".
