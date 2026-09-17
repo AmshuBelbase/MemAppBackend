@@ -1078,25 +1078,50 @@ async def chat_with_memories(q: str, timezone_offset: str = "+00:00", current_us
         )
         query_vector = query_result.embeddings[0].values
 
-        # 2. Search Supabase for the top 30 most relevant memories matching the query
+        # 2. Search Supabase for the top 100 most relevant memories
         semantic_response = supabase_client.rpc(
             "match_memories",
             {
                 "query_embedding": query_vector,
                 "match_threshold": 0.2,
                 "filter_user_id": current_user_id,
-                "match_count": 30
+                "match_count": 100
             }
         ).execute()
-        semantic_notes = semantic_response.data or []
+        raw_semantic_notes = semantic_response.data or []
         
-        # 3. Fetch the top 30 most recent memories for chronological context
-        recent_response = supabase_client.table("memories").select("id, raw_text, created_at").eq("user_id", current_user_id).order("created_at", desc=True).limit(30).execute()
-        recent_notes = recent_response.data or []
+        # 3. Fetch the top 30 most recent memories for chronological context (keep at 30 to avoid old notes)
+        recent_response = supabase_client.table("memories").select("id, raw_text, created_at, is_starred").eq("user_id", current_user_id).order("created_at", desc=True).limit(30).execute()
+        raw_recent_notes = recent_response.data or []
+        
+        # 3.5 Look up the 'is_starred' status for semantic matches
+        all_ids = list(set([n["id"] for n in raw_semantic_notes] + [n["id"] for n in raw_recent_notes]))
+        starred_map = {}
+        if all_ids:
+            star_status_res = supabase_client.table("memories").select("id, is_starred").in_("id", all_ids).execute()
+            for r in (star_status_res.data or []):
+                starred_map[r["id"]] = r.get("is_starred", False)
+                
+        # 4. Filter lists: take exactly the first 30 semantic matches. Beyond 30 (up to 100), only append if they are starred.
+        filtered_semantic = []
+        for i, note in enumerate(raw_semantic_notes):
+            is_starred = starred_map.get(note["id"], False)
+            note["is_starred"] = is_starred
+            if i < 30:
+                filtered_semantic.append(note)
+            elif is_starred:
+                filtered_semantic.append(note)
+                
+        # For recent notes, just take the 30 we fetched
+        filtered_recent = []
+        for note in raw_recent_notes:
+            is_starred = starred_map.get(note["id"], False)
+            note["is_starred"] = is_starred
+            filtered_recent.append(note)
         
         # Merge and deduplicate by ID
         unique_notes = {}
-        for note in semantic_notes + recent_notes:
+        for note in filtered_semantic + filtered_recent:
             unique_notes[note["id"]] = note
             
         retrieved_notes = list(unique_notes.values())
