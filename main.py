@@ -570,11 +570,19 @@ async def transcribe_audio_only(
 
         return {
             "status": "success",
-            "transcription": raw_text
+            "answer": answer_text,
+            "remaining_chats": remaining
         }
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Transcription Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/chat/status")
+async def get_chat_status(current_user_id: str = Depends(get_current_user)):
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    current_count = chat_usage_tracker[current_user_id][today_str]
+    remaining = max(0, 15 - current_count)
+    return {"status": "success", "remaining_chats": remaining}
 
 # This endpoint handles the entire pipeline: audio transcription, embedding generation, and database storage.
 @app.post("/api/memory")
@@ -1049,10 +1057,24 @@ async def check_balance(q: str, current_user_id: str = Depends(get_current_user)
 
 
 
+from collections import defaultdict
+
+# In-memory rate limiting for chat: { user_id: { "YYYY-MM-DD": count } }
+chat_usage_tracker = defaultdict(lambda: defaultdict(int))
+
 @app.get("/api/chat")
 async def chat_with_memories(q: str, timezone_offset: str = "+00:00", current_user_id: str = Depends(get_current_user)):
     if not q:
         raise HTTPException(status_code=400, detail="Query parameter 'q' is required")
+
+    # Rate limiting logic (15 chats per day per user)
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    current_count = chat_usage_tracker[current_user_id][today_str]
+    if current_count >= 15:
+        return {"answer": "You have reached your daily limit of 15 chats per day. Please try again tomorrow!", "remaining_chats": 0}
+    
+    chat_usage_tracker[current_user_id][today_str] += 1
+    remaining = 15 - chat_usage_tracker[current_user_id][today_str]
 
     try:
         # Parse the offset (e.g., "+05:30" or "-04:00")
@@ -1205,11 +1227,19 @@ async def chat_with_memories(q: str, timezone_offset: str = "+00:00", current_us
         return {
             "query": q,
             "answer": completion.choices[0].message.content.strip(),
-            "sources_utilized": len(retrieved_notes)
+            "sources_utilized": len(retrieved_notes),
+            "remaining_chats": remaining
         }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"RAG Engine Error: {str(e)}")
+
+@app.get("/api/chat/status")
+async def get_chat_status(current_user_id: str = Depends(get_current_user)):
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    current_count = chat_usage_tracker[current_user_id][today_str]
+    remaining = max(0, 15 - current_count)
+    return {"status": "success", "remaining_chats": remaining}
 
 # --- DASHBOARD ENDPOINTS ---
 
