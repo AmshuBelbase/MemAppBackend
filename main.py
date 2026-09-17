@@ -1423,10 +1423,12 @@ async def verify_otp(payload: OTPVerify):
 @app.post("/api/fcm-token")
 async def register_fcm_token(req: FCMTokenRequest, current_user_id: str = Depends(get_current_user)):
     try:
-        # Upsert the token (if it exists, do nothing or update)
-        response = supabase_client.table("fcm_tokens").select("*").eq("user_id", current_user_id).eq("token", req.token).execute()
-        if not response.data:
-            supabase_client.table("fcm_tokens").insert({"token": req.token, "user_id": current_user_id}).execute()
+        # 1. Delete this token from ALL users (to handle if another user was previously logged into this device)
+        supabase_admin.table("fcm_tokens").delete().eq("token", req.token).execute()
+        
+        # 2. Insert it freshly for the current user
+        supabase_admin.table("fcm_tokens").insert({"token": req.token, "user_id": current_user_id}).execute()
+        
         return {"status": "success", "message": "FCM token registered"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
