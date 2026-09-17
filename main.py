@@ -570,8 +570,7 @@ async def transcribe_audio_only(
 
         return {
             "status": "success",
-            "answer": answer_text,
-            "remaining_chats": remaining
+            "transcription": raw_text
         }
         
     except Exception as e:
