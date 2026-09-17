@@ -728,8 +728,8 @@ async def check_and_send_reminders(authorization: str = Header(None)):
             "For each task below, write a cool, motivating notification with:\n"
             "- title: max 5 words, witty/energetic\n"
             "- body: max 8 words, action-oriented, no due date or time\n\n"
-            "Return ONLY a valid JSON array in this exact format:\n"
-            '[{"task": "<original task name>", "title": "...", "body": "..."}]\n\n'
+            "Return ONLY a valid JSON object in this exact format:\n"
+            '{"notifications": [{"task": "<original task name>", "title": "...", "body": "..."}]}\n\n'
             f"Tasks:\n{chr(10).join(f'- {n}' for n in task_names)}"
         )
         try:
@@ -737,8 +737,7 @@ async def check_and_send_reminders(authorization: str = Header(None)):
                 messages=[{"role": "user", "content": prompt}],
                 model="openai/gpt-oss-120b",
                 temperature=0.8,
-                response_format={"type": "json_object"},
-                max_tokens=512,
+                response_format={"type": "json_object"}
             )
             import json as _json
             raw = completion.choices[0].message.content.strip()
@@ -880,15 +879,23 @@ async def check_and_send_reminders(authorization: str = Header(None)):
                                 notif_body = f"Due {time_left}"
 
                             for t in tokens_resp.data:
-                                message = messaging.Message(
-                                    notification=messaging.Notification(
-                                        title=notif_title,
-                                        body=notif_body,
-                                    ),
-                                    data={"screen": "reminders"},
-                                    token=t["token"],
-                                )
-                                messaging.send(message)
+                                token_str = t["token"]
+                                try:
+                                    message = messaging.Message(
+                                        notification=messaging.Notification(
+                                            title=notif_title,
+                                            body=notif_body,
+                                        ),
+                                        data={"screen": "reminders"},
+                                        token=token_str,
+                                    )
+                                    messaging.send(message)
+                                except messaging.UnregisteredError:
+                                    print(f"Token unregistered. Deleting from DB: {token_str}")
+                                    supabase_admin.table("fcm_tokens").delete().eq("token", token_str).execute()
+                                except Exception as e:
+                                    print(f"Failed to send to token {token_str}: {e}")
+
                         print(f"Sent {len(push_tasks_to_send)} push notifications to user {user_id}")
                         
                         # Mark last_push_sent_at in DB
@@ -896,7 +903,7 @@ async def check_and_send_reminders(authorization: str = Header(None)):
                             supabase_admin.table("reminders").update({"last_push_sent_at": now_utc.isoformat()}).eq("id", t["id"]).execute()
                             sent_count += 1
                 except Exception as push_err:
-                    print(f"Failed to send push notifications to user {user_id}: {push_err}")
+                    print(f"Failed to process push notifications for user {user_id}: {push_err}")
 
         return {"status": "success", "notifications_sent": sent_count}
 
