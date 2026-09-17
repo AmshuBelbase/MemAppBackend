@@ -755,32 +755,19 @@ async def check_and_send_reminders(authorization: str = Header(None)):
             return {}
 
     try:
-        # 2. Define the time window — look for tasks due within the next 60 minutes
         now_utc = datetime.now(timezone.utc)
-        time_window = now_utc + timedelta(minutes=60)
 
-        # 3. Query Supabase for active reminders within this window (bypasses RLS)
+        # 3. Query Supabase for active reminders (bypasses RLS)
         response = supabase_admin.table("reminders") \
             .select("*, memories(user_id)") \
-            .in_("status", ["phone", "both"]) \
-            .lte("due_datetime", time_window.isoformat()) \
+            .in_("status", ["phone", "both", "push_only"]) \
+            .eq("is_completed", False) \
             .execute()
 
-        due_tasks = response.data
-
-        if not due_tasks:
-            return {"status": "success", "message": "No pending tasks in the upcoming window."}
-
-        # 4. Separate completed tasks (mark them 'none') from actionable tasks
-        completed_ids = [t["id"] for t in due_tasks if t.get("is_completed") == True]
-        actionable_tasks = [t for t in due_tasks if t.get("is_completed") != True]
-
-        for task_id in completed_ids:
-            supabase_admin.table("reminders").update({"status": "none"}).eq("id", task_id).execute()
-            print(f"Task {task_id} was already completed — marked as 'none', skipping notification.")
+        actionable_tasks = response.data
 
         if not actionable_tasks:
-            return {"status": "success", "message": "All due tasks were already completed."}
+            return {"status": "success", "message": "No active tasks found."}
 
         # 5. Group actionable tasks by user_id — enforces strict per-user isolation
         from collections import defaultdict
@@ -795,22 +782,59 @@ async def check_and_send_reminders(authorization: str = Header(None)):
 
         sent_count = 0
         for user_id, tasks in grouped_tasks.items():
-            # --- Everything below is strictly scoped to THIS user_id only ---
+            # Determine which tasks get an email and which get a push NOW
+            email_tasks_to_send = []
+            push_tasks_to_send = []
+            
+            for task in tasks:
+                try:
+                    dt_obj = datetime.fromisoformat(task["due_datetime"].replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                    
+                delta_minutes = (dt_obj - now_utc).total_seconds() / 60.0
+                
+                # Check email logic
+                if task.get("status") == "both" and not task.get("email_sent"):
+                    if delta_minutes <= 60:
+                        email_tasks_to_send.append(task)
+                        
+                # Check push logic
+                last_push_str = task.get("last_push_sent_at")
+                if last_push_str:
+                    try:
+                        last_push_dt = datetime.fromisoformat(last_push_str.replace("Z", "+00:00"))
+                        minutes_since_push = (now_utc - last_push_dt).total_seconds() / 60.0
+                    except ValueError:
+                        minutes_since_push = float('inf')
+                else:
+                    minutes_since_push = float('inf')
+                    
+                should_push = False
+                if delta_minutes <= 60:
+                    if minutes_since_push >= 10:
+                        should_push = True
+                elif delta_minutes <= 180:
+                    if minutes_since_push >= 30:
+                        should_push = True
+                else:
+                    if minutes_since_push >= 60:
+                        should_push = True
+                        
+                if should_push:
+                    push_tasks_to_send.append(task)
 
-            email_tasks = [t for t in tasks if t.get("status") == "both"]
-            push_tasks = tasks  # phone + both both get push
+            # 6. Generate AI notification copy for this user's push tasks
+            ai_copy = await generate_ai_notifications(push_tasks_to_send) if push_tasks_to_send else {}
 
-            # 6. Generate AI notification copy for this user's push tasks (single API call)
-            ai_copy = await generate_ai_notifications(push_tasks) if push_tasks else {}
-
-            # 7. Send a SINGLE packed email for all email_tasks (one email per user per run)
-            if email_tasks:
+            # 7. Send a SINGLE packed email for all email_tasks
+            if email_tasks_to_send:
                 try:
                     user_record = supabase_admin.auth.admin.get_user_by_id(user_id)
                     user_email = user_record.user.email  # scoped to this user_id only
 
                     tasks_html = ""
-                    for task in email_tasks:
+                    for task in email_tasks_to_send:
                         dt_obj = datetime.fromisoformat(task["due_datetime"].replace("Z", "+00:00"))
                         time_left = format_remaining_time(dt_obj, now_utc)
                         tasks_html += f"""
@@ -820,10 +844,10 @@ async def check_and_send_reminders(authorization: str = Header(None)):
                             </div>
                         """
 
-                    subject = f"🔔 {len(email_tasks)} Reminder{'s' if len(email_tasks) > 1 else ''} Coming Up"
+                    subject = f"🔔 {len(email_tasks_to_send)} Reminder{'s' if len(email_tasks_to_send) > 1 else ''} Coming Up"
                     html_content = f"""
                     <div style="font-family: sans-serif; padding: 20px;">
-                        <h2>You have {len(email_tasks)} upcoming reminder{'s' if len(email_tasks) > 1 else ''}!</h2>
+                        <h2>You have {len(email_tasks_to_send)} upcoming reminder{'s' if len(email_tasks_to_send) > 1 else ''}!</h2>
                         {tasks_html}
                         <hr>
                         <p style="color: gray; font-size: 12px;">Sent automatically by your Voice Memory Hub</p>
@@ -831,16 +855,20 @@ async def check_and_send_reminders(authorization: str = Header(None)):
                     """
 
                     send_brevo_email(user_email, subject, html_content)
-                    print(f"Packed reminder email ({len(email_tasks)} tasks) sent to user {user_id}")
+                    print(f"Packed reminder email ({len(email_tasks_to_send)} tasks) sent to user {user_id}")
+                    
+                    # Mark email_sent in DB
+                    for t in email_tasks_to_send:
+                        supabase_admin.table("reminders").update({"email_sent": True}).eq("id", t["id"]).execute()
                 except Exception as email_err:
                     print(f"Failed to send email to user {user_id}: {email_err}")
 
             # 8. Send individual FCM push notifications
-            if push_tasks:
+            if push_tasks_to_send:
                 try:
                     tokens_resp = supabase_admin.table("fcm_tokens").select("token").eq("user_id", user_id).execute()
                     if tokens_resp.data:
-                        for task in push_tasks:
+                        for task in push_tasks_to_send:
                             dt_obj = datetime.fromisoformat(task["due_datetime"].replace("Z", "+00:00"))
                             time_left = format_remaining_time(dt_obj, now_utc)
 
@@ -862,15 +890,14 @@ async def check_and_send_reminders(authorization: str = Header(None)):
                                     token=t["token"],
                                 )
                                 messaging.send(message)
-                        print(f"Sent {len(push_tasks)} push notifications to user {user_id}")
+                        print(f"Sent {len(push_tasks_to_send)} push notifications to user {user_id}")
+                        
+                        # Mark last_push_sent_at in DB
+                        for t in push_tasks_to_send:
+                            supabase_admin.table("reminders").update({"last_push_sent_at": now_utc.isoformat()}).eq("id", t["id"]).execute()
+                            sent_count += 1
                 except Exception as push_err:
                     print(f"Failed to send push notifications to user {user_id}: {push_err}")
-
-            # 9. Update statuses
-            for task in tasks:
-                new_status = "sent_both" if task.get("status") == "both" else "sent_phone"
-                supabase_admin.table("reminders").update({"status": new_status}).eq("id", task["id"]).execute()
-                sent_count += 1
 
         return {"status": "success", "notifications_sent": sent_count}
 
