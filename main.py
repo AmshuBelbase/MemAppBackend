@@ -411,6 +411,73 @@ async def extract_transactions(text: str, memory_id: str = None, user_id: str = 
         print(f"Transaction extraction failed: {e}")
         return 0
 
+async def recategorize_transactions_for_month(user_id: str):
+    default_categories = ["Food & Groceries", "Clothing & Lifestyle", "Travel", "Entertainment", "Online Shopping", "Others"]
+    try:
+        cat_res = supabase_client.table("expense_categories").select("name").eq("user_id", user_id).execute()
+        custom_categories = [c["name"] for c in cat_res.data]
+        categories = default_categories + custom_categories
+    except:
+        categories = default_categories
+        
+    now = datetime.now(timezone.utc)
+    first_day = datetime(now.year, now.month, 1, tzinfo=timezone.utc).isoformat()
+    
+    try:
+        res = supabase_admin.table("transactions").select("*").eq("user_id", user_id).gte("created_at", first_day).execute()
+        if not res.data:
+            return
+            
+        transactions_to_evaluate = []
+        for t in res.data:
+            if t["transaction_type"] in ["expense", "income"]:
+                transactions_to_evaluate.append({
+                    "id": t["id"],
+                    "description": t["description"],
+                    "current_category": t["category"],
+                    "amount": t["amount"]
+                })
+                
+        if not transactions_to_evaluate:
+            return
+            
+        system_prompt = f"""
+        You are a precise financial categorization AI.
+        You are given a list of transactions (id, description, amount, current_category).
+        The available categories are: {', '.join(categories)}.
+        
+        Re-evaluate each transaction to see if it fits one of the available categories better than its current_category.
+        If a transaction already fits well, or there is no better category, DO NOT change it.
+        Return a strictly valid JSON object with a single key "updates" containing an array of objects.
+        Each object must have exactly two keys:
+        - "id": The transaction ID.
+        - "new_category": The chosen category from the list above.
+        Only include transactions that actually need their category changed.
+        If no transactions need changing, return {{"updates": []}}.
+        """
+        
+        completion = await groq_client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(transactions_to_evaluate)}
+            ],
+            model="openai/gpt-oss-120b",
+            temperature=0,
+            response_format={"type": "json_object"}
+        )
+        
+        data = json.loads(completion.choices[0].message.content.strip())
+        updates = data.get("updates", [])
+        
+        for u in updates:
+            t_id = u.get("id")
+            new_cat = u.get("new_category")
+            if t_id and new_cat in categories:
+                supabase_admin.table("transactions").update({"category": new_cat}).eq("id", t_id).execute()
+                
+    except Exception as e:
+        print(f"Recategorization failed: {e}")
+
 
 # --- API ENDPOINTS ---
 
@@ -491,10 +558,40 @@ async def get_expense_categories(current_user_id: str = Depends(get_current_user
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/expense_categories")
-async def add_expense_category(req: CategoryRequest, current_user_id: str = Depends(get_current_user)):
+async def add_expense_category(req: CategoryRequest, background_tasks: BackgroundTasks, current_user_id: str = Depends(get_current_user)):
     try:
+        if len(req.name) > 30:
+            raise HTTPException(status_code=400, detail="Category name must be 30 characters or less.")
+            
+        res = supabase_client.table("expense_categories").select("id", count="exact").eq("user_id", current_user_id).execute()
+        if res.count is not None and res.count >= 10:
+            raise HTTPException(status_code=400, detail="You can only have up to 10 custom categories.")
+            
         response = supabase_client.table("expense_categories").insert({"name": req.name, "user_id": current_user_id}).execute()
+        background_tasks.add_task(recategorize_transactions_for_month, current_user_id)
         return {"status": "success", "category": response.data[0]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/expense_categories/{category_name}")
+async def delete_expense_category(category_name: str, background_tasks: BackgroundTasks, current_user_id: str = Depends(get_current_user)):
+    try:
+        # Delete category from DB
+        supabase_client.table("expense_categories").delete().eq("name", category_name).eq("user_id", current_user_id).execute()
+        
+        # Mark older transactions as Others
+        now = datetime.now(timezone.utc)
+        first_day = datetime(now.year, now.month, 1, tzinfo=timezone.utc).isoformat()
+        
+        # Update past months directly to 'Others'
+        supabase_admin.table("transactions").update({"category": "Others"}).eq("user_id", current_user_id).eq("category", category_name).lt("created_at", first_day).execute()
+        
+        # Recategorize this month's transactions
+        background_tasks.add_task(recategorize_transactions_for_month, current_user_id)
+        
+        return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
