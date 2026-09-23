@@ -1650,7 +1650,7 @@ async def send_daily_drops(authorization: str = Header(None)):
             local_time = now_utc.astimezone(user_tz)
 
             # Check if it's between 6:00 AM and 6:59 AM local time
-            if local_time.hour == 0:
+            if local_time.hour == 6:
                 # Check if already sent today
                 last_sent_str = token.get("last_daily_drop_sent_at")
                 if last_sent_str:
