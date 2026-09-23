@@ -46,6 +46,7 @@ async def extract_reminders(text: str, memory_id: str):
     Each object must have exactly two keys: 
     - "task_name": A short, clear string.
     - "due_datetime": An ISO 8601 formatted timestamp (YYYY-MM-DDTHH:MM:SS+05:45).
+    If the task is a general note, plan, or todo list item without a specific deadline, return the exact placeholder date "2099-12-31T23:59:59+00:00" for due_datetime.
     If no events are mentioned, return an empty array [].
     """
 

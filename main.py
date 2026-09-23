@@ -136,6 +136,7 @@ async def extract_reminders(text: str, memory_id: str, timezone_offset: str = "+
     Analyze the user's memory and extract any explicit or implied tasks, meetings, or deadlines.
     IMPORTANT: While you must extract any genuine future tasks or deadlines mentioned in the text, you MUST NOT create fabricated tasks to "record" or "log" past events or financial transactions. (e.g. if the user says "I spent 50 rupees", do not create a reminder to "Record 50 rupees expense").
     If a true future task is implied but no specific time is given, schedule it for exactly 15 minutes from the current time as a default.
+    If the task is a general note, plan, or todo list item without a specific deadline, return the exact placeholder date "2099-12-31T23:59:59" for due_datetime.
     Return a strictly valid JSON object with a single key "reminders" containing an array of objects.
     Each object must have exactly two keys: 
     - "task_name": A short, clear string. If monetary values are involved, assume 'rs' or 'INR' as default if currency is not mentioned.
@@ -167,20 +168,26 @@ async def extract_reminders(text: str, memory_id: str, timezone_offset: str = "+
             try:
                 # Parse the naive local datetime string from the LLM
                 local_dt = datetime.strptime(reminder["due_datetime"], "%Y-%m-%dT%H:%M:%S")
-                # Attach the user's timezone to make it aware
-                aware_dt = local_dt.replace(tzinfo=user_tz)
-                # Convert to UTC string for Supabase
-                utc_dt_string = aware_dt.astimezone(timezone.utc).isoformat()
+                if local_dt.year == 2099:
+                    utc_dt_string = "2099-12-31T23:59:59Z"
+                    status = "none"
+                else:
+                    # Attach the user's timezone to make it aware
+                    aware_dt = local_dt.replace(tzinfo=user_tz)
+                    # Convert to UTC string for Supabase
+                    utc_dt_string = aware_dt.astimezone(timezone.utc).isoformat()
+                    status = "phone"
             except ValueError:
                 # Fallback if the LLM still provided 'Z' or offset
                 utc_dt_string = reminder["due_datetime"]
+                status = "phone"
 
             supabase_admin.table("reminders").insert({
                 "memory_id": memory_id,
                 "user_id": user_id,
                 "task_name": reminder["task_name"],
                 "due_datetime": utc_dt_string,
-                "status": "phone"
+                "status": status
             }).execute()
             
         return len(reminders)
@@ -1571,7 +1578,7 @@ async def register_fcm_token(req: FCMTokenRequest, current_user_id: str = Depend
 class ManualReminderRequest(BaseModel):
     memory_id: str
     task_name: str
-    due_datetime: str
+    due_datetime: str | None = None
 
 class ManualTransactionRequest(BaseModel):
     memory_id: str
@@ -1602,13 +1609,19 @@ async def delete_transaction(transaction_id: str, current_user_id: str = Depends
 @app.post("/api/reminders/manual")
 async def add_manual_reminder(request: ManualReminderRequest, current_user_id: str = Depends(get_current_user)):
     try:
+        dt = request.due_datetime
+        status = "phone"
+        if not dt:
+            dt = "2099-12-31T23:59:59Z"
+            status = "none"
+            
         data = {
             "user_id": current_user_id,
             "memory_id": request.memory_id,
-            "task": request.task_name,
-            "due_datetime": request.due_datetime,
+            "task_name": request.task_name,
+            "due_datetime": dt,
             "is_completed": False,
-            "status": "phone"
+            "status": status
         }
         res = supabase_admin.table("reminders").insert(data).execute()
         return {"status": "success", "reminder": res.data[0] if res.data else None}
