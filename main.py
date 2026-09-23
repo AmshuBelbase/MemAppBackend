@@ -1575,6 +1575,14 @@ async def register_fcm_token(req: FCMTokenRequest, current_user_id: str = Depend
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
 
+@app.delete("/api/fcm-token")
+async def remove_fcm_token(req: FCMTokenRequest, current_user_id: str = Depends(get_current_user)):
+    try:
+        supabase_admin.table("fcm_tokens").delete().eq("token", req.token).execute()
+        return {"status": "success", "message": "FCM token removed"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
+
 class ManualReminderRequest(BaseModel):
     memory_id: str
     task_name: str
