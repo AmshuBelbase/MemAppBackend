@@ -1426,6 +1426,8 @@ async def get_chat_status(current_user_id: str = Depends(get_current_user)):
 @app.delete("/api/memory/{memory_id}")
 async def delete_memory(memory_id: str, current_user_id: str = Depends(get_current_user)):
     try:
+        supabase_admin.table("reminders").delete().eq("memory_id", memory_id).execute()
+        supabase_admin.table("transactions").delete().eq("memory_id", memory_id).execute()
         response = supabase_client.table("memories").delete().eq("user_id", current_user_id).eq("id", memory_id).execute()
         return {"status": "success"}
     except Exception as e:
@@ -1460,7 +1462,7 @@ async def toggle_star_memory(memory_id: str, request: StarMemoryRequest, current
 @app.get("/api/reminders")
 async def get_all_reminders(current_user_id: str = Depends(get_current_user)):
     try:
-        response = supabase_admin.table("reminders").select("*").eq("user_id", current_user_id).order("due_datetime", desc=False).execute()
+        response = supabase_admin.table("reminders").select("*, memories(raw_text)").eq("user_id", current_user_id).order("due_datetime", desc=False).execute()
         return response.data
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
@@ -1490,7 +1492,7 @@ async def update_reminder_status(reminder_id: str, request: UpdateReminderReques
 @app.get("/api/transactions")
 async def get_all_transactions(current_user_id: str = Depends(get_current_user)):
     try:
-        response = supabase_admin.table("transactions").select("*").eq("user_id", current_user_id).order("created_at", desc=True).execute()
+        response = supabase_admin.table("transactions").select("*, memories(raw_text)").eq("user_id", current_user_id).order("created_at", desc=True).execute()
         return response.data
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
