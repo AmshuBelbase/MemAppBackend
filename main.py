@@ -902,10 +902,27 @@ async def check_and_send_reminders(authorization: str = Header(None)):
                 # Roll forward recurring alarms that are past due
                 if task.get("recurrence_rule") and delta_minutes < -1:
                     try:
-                        cron = croniter(task["recurrence_rule"], now_utc)
-                        next_dt = cron.get_next(datetime)
+                        # Fetch user timezone from fcm_tokens
+                        tz_offset = "+00:00"
+                        tokens_res = supabase_admin.table("fcm_tokens").select("timezone_offset").eq("user_id", task["user_id"]).execute()
+                        if tokens_res.data and tokens_res.data[0].get("timezone_offset"):
+                            tz_offset = tokens_res.data[0]["timezone_offset"]
+                        
+                        user_tz = timezone.utc
+                        try:
+                            sign = -1 if tz_offset.startswith("-") else 1
+                            parts = tz_offset.strip("+-").split(":")
+                            user_tz = timezone(timedelta(hours=int(parts[0]) * sign, minutes=int(parts[1]) * sign))
+                        except:
+                            pass
+                            
+                        now_local = datetime.now(user_tz)
+                        cron = croniter(task["recurrence_rule"], now_local)
+                        next_local_dt = cron.get_next(datetime)
+                        next_utc_dt = next_local_dt.astimezone(timezone.utc)
+                        
                         supabase_admin.table("reminders").update({
-                            "due_datetime": next_dt.isoformat(),
+                            "due_datetime": next_utc_dt.isoformat(),
                             "last_push_sent_at": None,
                             "email_sent": False
                         }).eq("id", task["id"]).execute()
@@ -1488,6 +1505,7 @@ async def get_all_reminders(current_user_id: str = Depends(get_current_user)):
 class UpdateReminderRequest(BaseModel):
     status: str | None = None
     is_completed: bool | None = None
+    timezone_offset: str | None = None
 
 @app.put("/api/reminders/{reminder_id}")
 async def update_reminder_status(reminder_id: str, request: UpdateReminderRequest, current_user_id: str = Depends(get_current_user)):
@@ -1504,11 +1522,23 @@ async def update_reminder_status(reminder_id: str, request: UpdateReminderReques
             
         if request.is_completed is not None:
             if request.is_completed is True and reminder.get("recurrence_rule"):
+                # Parse timezone
+                user_tz = timezone.utc
+                if request.timezone_offset:
+                    try:
+                        sign = -1 if request.timezone_offset.startswith("-") else 1
+                        parts = request.timezone_offset.strip("+-").split(":")
+                        user_tz = timezone(timedelta(hours=int(parts[0]) * sign, minutes=int(parts[1]) * sign))
+                    except:
+                        pass
+                
                 # Roll forward instead of completing
-                now_utc = datetime.now(timezone.utc)
-                cron = croniter(reminder["recurrence_rule"], now_utc)
-                next_dt = cron.get_next(datetime)
-                update_data["due_datetime"] = next_dt.isoformat()
+                now_local = datetime.now(user_tz)
+                cron = croniter(reminder["recurrence_rule"], now_local)
+                next_local_dt = cron.get_next(datetime)
+                next_utc_dt = next_local_dt.astimezone(timezone.utc)
+                
+                update_data["due_datetime"] = next_utc_dt.isoformat()
                 update_data["last_push_sent_at"] = None
                 update_data["email_sent"] = False
                 update_data["is_completed"] = False
