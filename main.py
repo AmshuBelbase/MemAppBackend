@@ -175,7 +175,7 @@ async def extract_reminders(text: str, memory_id: str, timezone_offset: str = "+
                 # Fallback if the LLM still provided 'Z' or offset
                 utc_dt_string = reminder["due_datetime"]
 
-            supabase_client.table("reminders").insert({
+            supabase_admin.table("reminders").insert({
                 "memory_id": memory_id,
                 "user_id": user_id,
                 "task_name": reminder["task_name"],
@@ -203,8 +203,8 @@ async def extract_transactions(text: str, memory_id: str = None, user_id: str = 
     known_people_list = []
     try:
         if user_id:
-            cred_res = supabase_client.table("transactions").select("creditor").eq("user_id", user_id).execute()
-            debt_res = supabase_client.table("transactions").select("debtor").eq("user_id", user_id).execute()
+            cred_res = supabase_admin.table("transactions").select("creditor").eq("user_id", user_id).execute()
+            debt_res = supabase_admin.table("transactions").select("debtor").eq("user_id", user_id).execute()
             
             known_people = set()
             for row in (cred_res.data or []):
@@ -916,8 +916,8 @@ async def check_and_send_reminders(authorization: str = Header(None)):
 async def delete_memory(memory_id: str, current_user_id: str = Depends(get_current_user)):
     try:
         # Delete related extractions to keep ledger clean
-        supabase_client.table("reminders").delete().eq("memory_id", memory_id).execute()
-        supabase_client.table("transactions").delete().eq("memory_id", memory_id).execute()
+        supabase_admin.table("reminders").delete().eq("memory_id", memory_id).execute()
+        supabase_admin.table("transactions").delete().eq("memory_id", memory_id).execute()
         
         # Delete the row where the ID matches
         response = supabase_client.table("memories").delete().eq("user_id", current_user_id).eq("id", memory_id).execute()
@@ -940,8 +940,8 @@ async def delete_multiple_memories(request: DeleteMemoriesRequest, current_user_
             return {"status": "success", "message": "No memories provided to delete."}
             
         # Delete related extractions for all IDs
-        supabase_client.table("reminders").delete().in_("memory_id", request.ids).execute()
-        supabase_client.table("transactions").delete().in_("memory_id", request.ids).execute()
+        supabase_admin.table("reminders").delete().in_("memory_id", request.ids).execute()
+        supabase_admin.table("transactions").delete().in_("memory_id", request.ids).execute()
         
         # Delete the memories
         supabase_client.table("memories").delete().eq("user_id", current_user_id).in_("id", request.ids).execute()
@@ -986,8 +986,8 @@ async def update_memory(memory_id: str, request: UpdateMemoryRequest, background
 
         # 3. Synchronize Extractions
         # Delete old extractions linked to this memory
-        supabase_client.table("reminders").delete().eq("memory_id", memory_id).execute()
-        supabase_client.table("transactions").delete().eq("memory_id", memory_id).execute()
+        supabase_admin.table("reminders").delete().eq("memory_id", memory_id).execute()
+        supabase_admin.table("transactions").delete().eq("memory_id", memory_id).execute()
         
         # Re-run extractors in background on the fresh text
         background_tasks.add_task(extract_reminders, raw_text, memory_id, request.timezone_offset, current_user_id)
@@ -1047,7 +1047,7 @@ async def check_balance(q: str, current_user_id: str = Depends(get_current_user)
         target_person = completion.choices[0].message.content.strip()
         
         # 2. Let the deterministic Database handle the math with Fuzzy Matching
-        all_transactions = supabase_client.table("transactions").select("*").eq("user_id", current_user_id).execute()
+        all_transactions = supabase_admin.table("transactions").select("*").eq("user_id", current_user_id).execute()
         
         target_lower = target_person.lower()
         
@@ -1313,7 +1313,7 @@ async def toggle_star_memory(memory_id: str, request: StarMemoryRequest, current
 @app.get("/api/reminders")
 async def get_all_reminders(current_user_id: str = Depends(get_current_user)):
     try:
-        response = supabase_client.table("reminders").select("*").eq("user_id", current_user_id).order("due_datetime", desc=False).execute()
+        response = supabase_admin.table("reminders").select("*").eq("user_id", current_user_id).order("due_datetime", desc=False).execute()
         return response.data
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
@@ -1333,7 +1333,7 @@ async def update_reminder_status(reminder_id: str, request: UpdateReminderReques
         
     try:
         if update_data:
-            response = supabase_client.table("reminders").update(update_data).eq("user_id", current_user_id).eq("id", reminder_id).execute()
+            response = supabase_admin.table("reminders").update(update_data).eq("user_id", current_user_id).eq("id", reminder_id).execute()
             if not response.data:
                 raise HTTPException(status_code=404, detail="Reminder not found.")
         return {"status": "success", "message": "Reminder updated."}
@@ -1343,7 +1343,7 @@ async def update_reminder_status(reminder_id: str, request: UpdateReminderReques
 @app.get("/api/transactions")
 async def get_all_transactions(current_user_id: str = Depends(get_current_user)):
     try:
-        response = supabase_client.table("transactions").select("*").eq("user_id", current_user_id).order("created_at", desc=True).execute()
+        response = supabase_admin.table("transactions").select("*").eq("user_id", current_user_id).order("created_at", desc=True).execute()
         return response.data
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
@@ -1484,7 +1484,7 @@ class ManualTransactionRequest(BaseModel):
 @app.delete("/api/reminders/{reminder_id}")
 async def delete_reminder(reminder_id: str, current_user_id: str = Depends(get_current_user)):
     try:
-        supabase_client.table("reminders").delete().eq("user_id", current_user_id).eq("id", reminder_id).execute()
+        supabase_admin.table("reminders").delete().eq("user_id", current_user_id).eq("id", reminder_id).execute()
         return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1492,7 +1492,7 @@ async def delete_reminder(reminder_id: str, current_user_id: str = Depends(get_c
 @app.delete("/api/transactions/{transaction_id}")
 async def delete_transaction(transaction_id: str, current_user_id: str = Depends(get_current_user)):
     try:
-        supabase_client.table("transactions").delete().eq("user_id", current_user_id).eq("id", transaction_id).execute()
+        supabase_admin.table("transactions").delete().eq("user_id", current_user_id).eq("id", transaction_id).execute()
         return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1508,7 +1508,7 @@ async def add_manual_reminder(request: ManualReminderRequest, current_user_id: s
             "is_completed": False,
             "status": "phone"
         }
-        res = supabase_client.table("reminders").insert(data).execute()
+        res = supabase_admin.table("reminders").insert(data).execute()
         return {"status": "success", "reminder": res.data[0] if res.data else None}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
