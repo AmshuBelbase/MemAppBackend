@@ -403,7 +403,7 @@ async def extract_transactions(text: str, memory_id: str = None, user_id: str = 
             valid_transactions.append(t)
         
         if valid_transactions:
-            supabase_client.table("transactions").insert(valid_transactions).execute()
+            supabase_admin.table("transactions").insert(valid_transactions).execute()
             
         return len(valid_transactions)
             
@@ -1527,7 +1527,7 @@ async def add_manual_transaction(request: ManualTransactionRequest, current_user
             "creditor": request.creditor,
             "debtor": request.debtor
         }
-        res = supabase_client.table("transactions").insert(data).execute()
+        res = supabase_admin.table("transactions").insert(data).execute()
         return {"status": "success", "transaction": res.data[0] if res.data else None}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
