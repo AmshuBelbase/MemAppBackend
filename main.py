@@ -1532,9 +1532,14 @@ async def update_reminder_status(reminder_id: str, request: UpdateReminderReques
                     except:
                         pass
                 
-                # Roll forward instead of completing
+                # Calculate base time for croniter (max of now and current due date)
                 now_local = datetime.now(user_tz)
-                cron = croniter(reminder["recurrence_rule"], now_local)
+                current_due_utc = datetime.fromisoformat(reminder["due_datetime"].replace("Z", "+00:00"))
+                current_due_local = current_due_utc.astimezone(user_tz)
+                base_time = max(now_local, current_due_local)
+                
+                # Roll forward instead of completing
+                cron = croniter(reminder["recurrence_rule"], base_time)
                 next_local_dt = cron.get_next(datetime)
                 next_utc_dt = next_local_dt.astimezone(timezone.utc)
                 
