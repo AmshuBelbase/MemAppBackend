@@ -1285,6 +1285,19 @@ async def chat_with_memories(q: str, timezone_offset: str = "+00:00", current_us
             
         retrieved_notes = list(unique_notes.values())
         
+        # Fetch reminders and transactions for all retrieved memories
+        from collections import defaultdict
+        reminders_map = defaultdict(list)
+        transactions_map = defaultdict(list)
+        if all_ids:
+            reminders_res = supabase_client.table("reminders").select("memory_id, task_name, due_datetime, is_completed").in_("memory_id", all_ids).execute()
+            for r in (reminders_res.data or []):
+                reminders_map[r["memory_id"]].append(r)
+                
+            transactions_res = supabase_client.table("transactions").select("memory_id, transaction_type, amount, currency, description, category, creditor, debtor").in_("memory_id", all_ids).execute()
+            for t in (transactions_res.data or []):
+                transactions_map[t["memory_id"]].append(t)
+        
         # 4. Format the retrieved memories into a structured context string for the LLM
         context_text = ""
         for index, note in enumerate(retrieved_notes):
@@ -1297,6 +1310,36 @@ async def chat_with_memories(q: str, timezone_offset: str = "+00:00", current_us
             except:
                 pass
             context_text += f"Memory [{index + 1}] | Created: {dt_str} | {note.get('raw_text', '')}\n"
+            
+            memory_reminders = reminders_map.get(note["id"], [])
+            if memory_reminders:
+                context_text += f"  - Extracted Reminders & Notes:\n"
+                for r in memory_reminders:
+                    status = "Completed" if r.get("is_completed") else "Not Completed"
+                    r_dt_str = r.get("due_datetime", "")
+                    if "2099" in r_dt_str:
+                        r_dt_str = "No deadline"
+                    else:
+                        try:
+                            r_dt = datetime.fromisoformat(r_dt_str.replace('Z', '+00:00'))
+                            r_dt_local = r_dt.astimezone(user_tz)
+                            r_dt_str = r_dt_local.strftime("%Y-%m-%d %H:%M")
+                        except:
+                            pass
+                    context_text += f"    * {r.get('task_name')} | Due: {r_dt_str} | Status: {status}\n"
+                    
+            memory_transactions = transactions_map.get(note["id"], [])
+            if memory_transactions:
+                context_text += f"  - Extracted Transactions:\n"
+                for t in memory_transactions:
+                    t_type = t.get("transaction_type")
+                    amt = f"{t.get('amount')} {t.get('currency')}"
+                    desc = t.get("description", "")
+                    if t_type == "split":
+                        context_text += f"    * Split: {desc} | {t.get('debtor')} owes {t.get('creditor')} {amt}\n"
+                    else:
+                        cat = t.get("category", "")
+                        context_text += f"    * {str(t_type).capitalize()}: {desc} | Amount: {amt} | Category: {cat}\n"
 
         current_datetime = datetime.now(user_tz).strftime("%Y-%m-%d %H:%M Local Time")
 
