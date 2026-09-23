@@ -1447,6 +1447,7 @@ async def get_all_transactions(current_user_id: str = Depends(get_current_user))
 
 class FCMTokenRequest(BaseModel):
     token: str
+    timezone_offset: str | None = None
 
 class EmailData(BaseModel):
     token: str
@@ -1557,7 +1558,11 @@ async def register_fcm_token(req: FCMTokenRequest, current_user_id: str = Depend
         supabase_admin.table("fcm_tokens").delete().eq("token", req.token).execute()
         
         # 2. Insert it freshly for the current user
-        supabase_admin.table("fcm_tokens").insert({"token": req.token, "user_id": current_user_id}).execute()
+        data = {"token": req.token, "user_id": current_user_id}
+        if req.timezone_offset:
+            data["timezone_offset"] = req.timezone_offset
+            
+        supabase_admin.table("fcm_tokens").insert(data).execute()
         
         return {"status": "success", "message": "FCM token registered"}
     except Exception as e:
@@ -1609,6 +1614,153 @@ async def add_manual_reminder(request: ManualReminderRequest, current_user_id: s
         return {"status": "success", "reminder": res.data[0] if res.data else None}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/internal/daily-drops")
+async def send_daily_drops(authorization: str = Header(None)):
+    expected_secret = os.environ.get("CRON_SECRET")
+    if authorization != f"Bearer {expected_secret}":
+        raise HTTPException(status_code=401, detail="Unauthorized cron trigger")
+
+    try:
+        now_utc = datetime.now(timezone.utc)
+        
+        # 1. Fetch tokens with timezones
+        tokens_resp = supabase_admin.table("fcm_tokens").select("*").not_.is_("timezone_offset", "null").execute()
+        tokens = tokens_resp.data or []
+
+        if not tokens:
+            return {"status": "success", "message": "No tokens with timezones found."}
+
+        # 2. Filter tokens that should receive the drop right now
+        tokens_to_send = []
+        for token in tokens:
+            tz_offset = token.get("timezone_offset", "+00:00")
+            # Parse offset
+            offset_hours = 0
+            offset_minutes = 0
+            try:
+                sign = 1 if tz_offset[0] == '+' else -1
+                parts = tz_offset[1:].split(':')
+                offset_hours = sign * int(parts[0])
+                offset_minutes = sign * int(parts[1]) if len(parts) > 1 else 0
+            except:
+                pass
+            
+            user_tz = timezone(timedelta(hours=offset_hours, minutes=offset_minutes))
+            local_time = now_utc.astimezone(user_tz)
+
+            # Check if it's between 6:00 AM and 6:59 AM local time
+            if local_time.hour == 6:
+                # Check if already sent today
+                last_sent_str = token.get("last_daily_drop_sent_at")
+                if last_sent_str:
+                    try:
+                        last_sent_dt = datetime.fromisoformat(last_sent_str.replace("Z", "+00:00")).astimezone(user_tz)
+                        if last_sent_dt.date() == local_time.date():
+                            continue # Already sent today
+                    except ValueError:
+                        pass
+                
+                tokens_to_send.append(token)
+
+        if not tokens_to_send:
+            return {"status": "success", "message": "No daily drops to send at this hour."}
+
+        # 3. Group by user_id to generate content efficiently
+        from collections import defaultdict
+        user_tokens_map = defaultdict(list)
+        for t in tokens_to_send:
+            user_tokens_map[t["user_id"]].append(t)
+
+        sent_count = 0
+        for user_id, user_tokens in user_tokens_map.items():
+            # Get user's timezone from the first token for date filtering
+            first_token_tz = user_tokens[0].get("timezone_offset", "+00:00")
+            sign = 1 if first_token_tz[0] == '+' else -1
+            parts = first_token_tz[1:].split(':')
+            user_tz = timezone(timedelta(hours=sign * int(parts[0]), minutes=sign * int(parts[1] if len(parts) > 1 else 0)))
+            local_time = now_utc.astimezone(user_tz)
+            today_date_str = local_time.strftime("%Y-%m-%d")
+
+            # A. Fetch today's tasks
+            reminders_resp = supabase_admin.table("reminders").select("*").eq("user_id", user_id).eq("is_completed", False).execute()
+            all_reminders = reminders_resp.data or []
+            
+            todays_tasks = []
+            for r in all_reminders:
+                try:
+                    dt = datetime.fromisoformat(r["due_datetime"].replace("Z", "+00:00")).astimezone(user_tz)
+                    if dt.strftime("%Y-%m-%d") == today_date_str:
+                        todays_tasks.append(r["task_name"])
+                except:
+                    pass
+
+            # B. Fetch recent memories for context
+            memories_resp = supabase_admin.table("memories").select("raw_text").eq("user_id", user_id).order("created_at", desc=True).limit(10).execute()
+            recent_memories = [m["raw_text"] for m in (memories_resp.data or [])]
+
+            # C. Generate Daily Drop content
+            tasks_context = "\n".join(f"- {t}" for t in todays_tasks) if todays_tasks else "No specific tasks scheduled for today."
+            memories_context = "\n".join(f"- {m}" for m in recent_memories)
+
+            system_prompt = (
+                "You are MemApp, a highly intelligent and empathetic personal cognitive assistant. "
+                "Your job is to generate a 'Daily Drop' morning push notification for the user. "
+                "It should be meaningful, highly relatable to their recent thoughts, and set a positive tone for the day.\n\n"
+                f"Today's Tasks:\n{tasks_context}\n\n"
+                f"Recent User Thoughts/Memories:\n{memories_context}\n\n"
+                "Instructions:\n"
+                "1. Acknowledge their tasks if they have any, or encourage them if they don't.\n"
+                "2. Weave in a subtle, relatable motivational thought or insight based on their recent memories (e.g., if they talked about stress, offer calm; if they talked about a project, offer focus).\n"
+                "3. Keep it brief! Max 2 short sentences for the body, as it's a push notification.\n"
+                "4. Return ONLY a valid JSON object in this exact format:\n"
+                '{"title": "Good morning! ☀️", "body": "Your relatable message here..."}'
+            )
+
+            try:
+                completion = await groq_client.chat.completions.create(
+                    messages=[{"role": "system", "content": system_prompt}],
+                    model="openai/gpt-oss-120b",
+                    temperature=0.7,
+                    response_format={"type": "json_object"}
+                )
+                import json as _json
+                raw = completion.choices[0].message.content.strip()
+                ai_msg = _json.loads(raw)
+                notif_title = ai_msg.get("title", "Daily Drop")
+                notif_body = ai_msg.get("body", "Good morning! Ready for the day?")
+            except Exception as e:
+                print(f"Failed to generate daily drop for user {user_id}: {e}")
+                notif_title = "Morning! ☀️"
+                notif_body = "Your daily itinerary is ready. Have a great day!"
+
+            # D. Send to all eligible tokens
+            for token in user_tokens:
+                token_str = token["token"]
+                try:
+                    message = messaging.Message(
+                        notification=messaging.Notification(
+                            title=notif_title,
+                            body=notif_body,
+                        ),
+                        data={"screen": "daily_drop", "content": notif_body, "title": notif_title},
+                        token=token_str,
+                    )
+                    messaging.send(message)
+                    
+                    # Update last_daily_drop_sent_at in DB
+                    supabase_admin.table("fcm_tokens").update({"last_daily_drop_sent_at": now_utc.isoformat()}).eq("token", token_str).execute()
+                    sent_count += 1
+                except messaging.UnregisteredError:
+                    print(f"Token unregistered. Deleting from DB: {token_str}")
+                    supabase_admin.table("fcm_tokens").delete().eq("token", token_str).execute()
+                except Exception as e:
+                    print(f"Failed to send daily drop to token {token_str}: {e}")
+
+        return {"status": "success", "daily_drops_sent": sent_count}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Daily Drops Cron Error: {str(e)}")
 
 @app.post("/api/transactions/manual")
 async def add_manual_transaction(request: ManualTransactionRequest, current_user_id: str = Depends(get_current_user)):
