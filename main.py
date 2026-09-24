@@ -166,25 +166,22 @@ async def extract_reminders(text: str, memory_id: str, timezone_offset: str = "+
         data = json.loads(response_text)
         reminders = data.get("reminders", [])
         
+        inserted_reminders = []
         for reminder in reminders:
             try:
-                # Parse the naive local datetime string from the LLM
                 local_dt = datetime.strptime(reminder["due_datetime"], "%Y-%m-%dT%H:%M:%S")
                 if local_dt.year == 2099:
                     utc_dt_string = "2099-12-31T23:59:59Z"
                     status = "none"
                 else:
-                    # Attach the user's timezone to make it aware
                     aware_dt = local_dt.replace(tzinfo=user_tz)
-                    # Convert to UTC string for Supabase
                     utc_dt_string = aware_dt.astimezone(timezone.utc).isoformat()
                     status = "phone"
             except ValueError:
-                # Fallback if the LLM still provided 'Z' or offset
                 utc_dt_string = reminder["due_datetime"]
                 status = "phone"
 
-            supabase_admin.table("reminders").insert({
+            res = supabase_admin.table("reminders").insert({
                 "memory_id": memory_id,
                 "user_id": user_id,
                 "task_name": reminder["task_name"],
@@ -193,11 +190,14 @@ async def extract_reminders(text: str, memory_id: str, timezone_offset: str = "+
                 "recurrence_rule": reminder.get("recurrence_rule")
             }).execute()
             
-        return len(reminders)
+            if res.data:
+                inserted_reminders.extend(res.data)
+            
+        return inserted_reminders
         
     except Exception as e:
         print(f"Extraction failed: {e}")
-        return 0
+        return []
 
 
 async def extract_transactions(text: str, memory_id: str = None, user_id: str = None):
@@ -412,14 +412,17 @@ async def extract_transactions(text: str, memory_id: str = None, user_id: str = 
                 t["user_id"] = user_id
             valid_transactions.append(t)
         
+        inserted_tx = []
         if valid_transactions:
-            supabase_admin.table("transactions").insert(valid_transactions).execute()
+            res = supabase_admin.table("transactions").insert(valid_transactions).execute()
+            if res.data:
+                inserted_tx.extend(res.data)
             
-        return len(valid_transactions)
+        return inserted_tx
             
     except Exception as e:
         print(f"Transaction extraction failed: {e}")
-        return 0
+        return []
 
 async def recategorize_transactions_for_month(user_id: str):
     default_categories = ["Food & Groceries", "Clothing & Lifestyle", "Travel", "Entertainment", "Online Shopping", "Others"]
@@ -507,12 +510,12 @@ async def manual_extract_reminder(memory_id: str, request: Request, current_user
         raise HTTPException(status_code=404, detail="Memory not found")
         
     raw_text = res.data[0]["raw_text"]
-    count = await extract_reminders(raw_text, memory_id, timezone_offset, current_user_id)
+    inserted = await extract_reminders(raw_text, memory_id, timezone_offset, current_user_id)
     
-    if count == 0:
+    if not inserted:
         return {"status": "error", "message": "Could not extract a reminder from this note."}
         
-    return {"status": "success", "message": f"Successfully extracted {count} reminder(s)."}
+    return {"status": "success", "message": f"Successfully extracted {len(inserted)} reminder(s).", "reminders": inserted}
 
 @app.post("/api/memories/{memory_id}/extract-finance")
 async def manual_extract_finance(memory_id: str, current_user_id: str = Depends(get_current_user)):
@@ -521,12 +524,12 @@ async def manual_extract_finance(memory_id: str, current_user_id: str = Depends(
         raise HTTPException(status_code=404, detail="Memory not found")
         
     raw_text = res.data[0]["raw_text"]
-    count = await extract_transactions(raw_text, memory_id, current_user_id)
+    inserted = await extract_transactions(raw_text, memory_id, current_user_id)
     
-    if count == 0:
+    if not inserted:
         return {"status": "error", "message": "Could not extract a finance transaction from this note."}
         
-    return {"status": "success", "message": f"Successfully extracted {count} transaction(s)."}
+    return {"status": "success", "message": f"Successfully extracted {len(inserted)} transaction(s).", "transactions": inserted}
 
 @app.get("/api/memories")
 async def get_all_memories(current_user_id: str = Depends(get_current_user)):
@@ -635,15 +638,18 @@ async def store_text_memory(request: TextMemoryRequest, background_tasks: Backgr
         response = supabase_client.table("memories").insert(data).execute()
         memory_id = response.data[0]["id"]
 
-        # 3. Run the LLM extractors in the background
-        background_tasks.add_task(extract_reminders, raw_text, memory_id, request.timezone_offset, current_user_id)
-        background_tasks.add_task(extract_transactions, raw_text, memory_id, current_user_id)
+        # Run the LLM extractors synchronously to return complete state to frontend
+        new_reminders = await extract_reminders(raw_text, memory_id, request.timezone_offset, current_user_id)
+        new_tx = await extract_transactions(raw_text, memory_id, current_user_id)
         
         return {
             "status": "success",
             "saved_text": raw_text,
             "database_id": memory_id,
-            "message": "Memory saved. Reminders and Transactions are processing in the background."
+            "memory": response.data[0],
+            "reminders": new_reminders,
+            "transactions": new_tx,
+            "message": "Memory saved and fully processed."
         }
         
     except Exception as e:
@@ -745,15 +751,18 @@ async def transcribe_and_store_audio(
 
         memory_id = response.data[0]["id"]
 
-        # Run the LLM extractors in the background
-        background_tasks.add_task(extract_reminders, raw_text, memory_id, timezone_offset, current_user_id)
-        background_tasks.add_task(extract_transactions, raw_text, memory_id, current_user_id)
+        # Run the LLM extractors synchronously to return complete state to frontend
+        new_reminders = await extract_reminders(raw_text, memory_id, timezone_offset, current_user_id)
+        new_tx = await extract_transactions(raw_text, memory_id, current_user_id)
         
         return {
             "status": "success",
             "transcription": raw_text,
             "database_id": memory_id,
-            "message": "Audio saved. Reminders and Transactions are processing in the background."
+            "memory": response.data[0],
+            "reminders": new_reminders,
+            "transactions": new_tx,
+            "message": "Audio saved and fully processed."
         }
         
     except Exception as e:
