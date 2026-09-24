@@ -692,7 +692,15 @@ async def transcribe_audio_only(
 @app.get("/api/chat/status")
 async def get_chat_status(current_user_id: str = Depends(get_current_user)):
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    current_count = chat_usage_tracker[current_user_id][today_str]
+    current_count = 0
+    try:
+        user_resp = supabase_admin.auth.admin.get_user_by_id(current_user_id)
+        metadata = user_resp.user.user_metadata or {}
+        if metadata.get("chat_date") == today_str:
+            current_count = metadata.get("chat_count", 0)
+    except Exception as e:
+        print(f"Error reading chat status from Supabase: {e}")
+        
     remaining = max(0, 15 - current_count)
     return {"status": "success", "remaining_chats": remaining}
 
@@ -1262,12 +1270,28 @@ async def chat_with_memories(q: str, timezone_offset: str = "+00:00", current_us
 
     # Rate limiting logic (15 chats per day per user)
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    current_count = chat_usage_tracker[current_user_id][today_str]
+    current_count = 0
+    try:
+        user_resp = supabase_admin.auth.admin.get_user_by_id(current_user_id)
+        metadata = user_resp.user.user_metadata or {}
+        if metadata.get("chat_date") == today_str:
+            current_count = metadata.get("chat_count", 0)
+    except Exception as e:
+        print(f"Error reading chat status for user {current_user_id}: {e}")
+
     if current_count >= 15:
         return {"answer": "You have reached your daily limit of 15 chats per day. Please try again tomorrow!", "remaining_chats": 0}
     
-    chat_usage_tracker[current_user_id][today_str] += 1
-    remaining = 15 - chat_usage_tracker[current_user_id][today_str]
+    current_count += 1
+    try:
+        supabase_admin.auth.admin.update_user_by_id(
+            current_user_id,
+            attributes={"user_metadata": {"chat_date": today_str, "chat_count": current_count}}
+        )
+    except Exception as e:
+        print(f"Error updating chat count for user {current_user_id}: {e}")
+        
+    remaining = max(0, 15 - current_count)
 
     try:
         # Parse the offset (e.g., "+05:30" or "-04:00")
