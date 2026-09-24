@@ -947,16 +947,24 @@ async def check_and_send_reminders(authorization: str = Header(None)):
                 else:
                     minutes_since_push = float('inf')
                     
+                is_recurring = bool(task.get("recurrence_rule"))
                 should_push = False
-                if delta_minutes <= 60:
-                    if minutes_since_push >= 10:
-                        should_push = True
-                elif delta_minutes <= 180:
-                    if minutes_since_push >= 30:
+                
+                if is_recurring:
+                    # Send only once when it's within 10 minutes of the due time
+                    if delta_minutes <= 10 and minutes_since_push == float('inf'):
                         should_push = True
                 else:
-                    if minutes_since_push >= 60:
-                        should_push = True
+                    if delta_minutes <= 60:
+                        if minutes_since_push >= 15:
+                            should_push = True
+                    elif delta_minutes <= 180:
+                        if minutes_since_push >= 60:
+                            should_push = True
+                    elif delta_minutes <= 1440:  # 24 hours
+                        if minutes_since_push >= 180:  # 3 hours
+                            should_push = True
+                    # If delta_minutes > 1440 (> 24h), no notifications
                         
                 if should_push:
                     push_tasks_to_send.append(task)
