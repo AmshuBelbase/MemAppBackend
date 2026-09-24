@@ -955,16 +955,20 @@ async def check_and_send_reminders(authorization: str = Header(None)):
                     if delta_minutes <= 10 and minutes_since_push == float('inf'):
                         should_push = True
                 else:
-                    if delta_minutes <= 60:
+                    # Non-recurring: The Milestone Strategy
+                    if delta_minutes <= 15:
                         if minutes_since_push >= 15:
                             should_push = True
-                    elif delta_minutes <= 180:
+                    elif delta_minutes <= 60:
                         if minutes_since_push >= 60:
                             should_push = True
-                    elif delta_minutes <= 1440:  # 24 hours
-                        if minutes_since_push >= 180:  # 3 hours
+                    elif delta_minutes <= 180:
+                        if minutes_since_push >= 180:
                             should_push = True
-                    # If delta_minutes > 1440 (> 24h), no notifications
+                    elif delta_minutes <= 1440:
+                        if minutes_since_push >= 1440:
+                            should_push = True
+                    # > 24 hours: no notifications
                         
                 if should_push:
                     push_tasks_to_send.append(task)
