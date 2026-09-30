@@ -175,6 +175,18 @@ async def extract_reminders(text: str, memory_id: str, timezone_offset: str = "+
                     status = "none"
                 else:
                     aware_dt = local_dt.replace(tzinfo=user_tz)
+                    
+                    # If this is a recurring task, mathematically compute the strict NEXT occurrence from NOW
+                    # to override any potential LLM hallucinations of the weekday.
+                    if reminder.get("recurrence_rule"):
+                        try:
+                            # Start looking from 1 minute in the past so if they set it for right now, it catches it
+                            now_base = datetime.now(user_tz) - timedelta(minutes=1)
+                            cron = croniter(reminder["recurrence_rule"], now_base)
+                            aware_dt = cron.get_next(datetime)
+                        except Exception as e:
+                            pass
+                            
                     utc_dt_string = aware_dt.astimezone(timezone.utc).isoformat()
                     status = "phone"
             except ValueError:
