@@ -187,7 +187,7 @@ async def extract_reminders(text: str, memory_id: str, timezone_offset: str = "+
                 "task_name": reminder["task_name"],
                 "due_datetime": utc_dt_string,
                 "status": status,
-                "recurrence_rule": reminder.get("recurrence_rule")
+                "recurrence_rule": f"{reminder['recurrence_rule']}|{timezone_offset}" if reminder.get("recurrence_rule") else None
             }).execute()
             
             if res.data:
@@ -919,11 +919,15 @@ async def check_and_send_reminders(authorization: str = Header(None)):
                 # Roll forward recurring alarms that are past due
                 if task.get("recurrence_rule") and delta_minutes < -1:
                     try:
-                        # Fetch user timezone from fcm_tokens
-                        tz_offset = "+00:00"
-                        tokens_res = supabase_admin.table("fcm_tokens").select("timezone_offset").eq("user_id", task["user_id"]).execute()
-                        if tokens_res.data and tokens_res.data[0].get("timezone_offset"):
-                            tz_offset = tokens_res.data[0]["timezone_offset"]
+                        raw_rule = task["recurrence_rule"]
+                        if "|" in raw_rule:
+                            cron_rule, tz_offset = raw_rule.split("|")
+                        else:
+                            cron_rule = raw_rule
+                            tz_offset = "+00:00"
+                            tokens_res = supabase_admin.table("fcm_tokens").select("timezone_offset").eq("user_id", task["user_id"]).execute()
+                            if tokens_res.data and tokens_res.data[0].get("timezone_offset"):
+                                tz_offset = tokens_res.data[0]["timezone_offset"]
                         
                         user_tz = timezone.utc
                         try:
@@ -934,7 +938,7 @@ async def check_and_send_reminders(authorization: str = Header(None)):
                             pass
                             
                         now_local = datetime.now(user_tz)
-                        cron = croniter(task["recurrence_rule"], now_local)
+                        cron = croniter(cron_rule, now_local)
                         next_local_dt = cron.get_next(datetime)
                         next_utc_dt = next_local_dt.astimezone(timezone.utc)
                         
@@ -1567,15 +1571,20 @@ async def update_reminder_status(reminder_id: str, request: UpdateReminderReques
             
         if request.is_completed is not None:
             if request.is_completed is True and reminder.get("recurrence_rule"):
-                # Parse timezone
+                raw_rule = reminder["recurrence_rule"]
+                if "|" in raw_rule:
+                    cron_rule, tz_offset = raw_rule.split("|")
+                else:
+                    cron_rule = raw_rule
+                    tz_offset = request.timezone_offset or "+00:00"
+
                 user_tz = timezone.utc
-                if request.timezone_offset:
-                    try:
-                        sign = -1 if request.timezone_offset.startswith("-") else 1
-                        parts = request.timezone_offset.strip("+-").split(":")
-                        user_tz = timezone(timedelta(hours=int(parts[0]) * sign, minutes=int(parts[1]) * sign))
-                    except:
-                        pass
+                try:
+                    sign = -1 if tz_offset.startswith("-") else 1
+                    parts = tz_offset.strip("+-").split(":")
+                    user_tz = timezone(timedelta(hours=int(parts[0]) * sign, minutes=int(parts[1]) * sign))
+                except:
+                    pass
                 
                 # Calculate base time for croniter (max of now and current due date)
                 now_local = datetime.now(user_tz)
@@ -1584,7 +1593,7 @@ async def update_reminder_status(reminder_id: str, request: UpdateReminderReques
                 base_time = max(now_local, current_due_local)
                 
                 # Roll forward instead of completing
-                cron = croniter(reminder["recurrence_rule"], base_time)
+                cron = croniter(cron_rule, base_time)
                 next_local_dt = cron.get_next(datetime)
                 next_utc_dt = next_local_dt.astimezone(timezone.utc)
                 
@@ -1966,4 +1975,49 @@ if __name__ == "__main__":
     import uvicorn
     # Read assigned port from cloud environment variable, fallback to 8000 locally
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False) # Turned off reload for production stability
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False) # Turned off reload for production stabilityclass BulkUpdateTzRequest(BaseModel):
+    new_timezone_offset: str
+
+@app.post("/api/reminders/bulk-update-timezone")
+async def bulk_update_timezone(request: BulkUpdateTzRequest, current_user_id: str = Depends(get_current_user)):
+    try:
+        response = supabase_admin.table("reminders").select("*").eq("user_id", current_user_id).not_.is_("recurrence_rule", "null").execute()
+        reminders = response.data or []
+        
+        updated_count = 0
+        for r in reminders:
+            raw_rule = r["recurrence_rule"]
+            if "|" in raw_rule:
+                cron_rule, old_tz = raw_rule.split("|", 1)
+            else:
+                cron_rule = raw_rule
+                old_tz = "+00:00"
+            
+            if old_tz == request.new_timezone_offset:
+                continue
+                
+            new_rule = f"{cron_rule}|{request.new_timezone_offset}"
+            
+            new_tz_obj = timezone.utc
+            try:
+                sign = -1 if request.new_timezone_offset.startswith("-") else 1
+                parts = request.new_timezone_offset.strip("+-").split(":")
+                new_tz_obj = timezone(timedelta(hours=int(parts[0]) * sign, minutes=int(parts[1]) * sign))
+            except:
+                pass
+                
+            now_local = datetime.now(new_tz_obj)
+            cron = croniter(cron_rule, now_local)
+            next_local_dt = cron.get_next(datetime)
+            next_utc_dt = next_local_dt.astimezone(timezone.utc)
+            
+            supabase_admin.table("reminders").update({
+                "recurrence_rule": new_rule,
+                "due_datetime": next_utc_dt.isoformat(),
+                "is_completed": False
+            }).eq("id", r["id"]).execute()
+            updated_count += 1
+            
+        return {"status": "success", "updated_count": updated_count}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
