@@ -1547,7 +1547,36 @@ async def toggle_star_memory(memory_id: str, request: StarMemoryRequest, current
 async def get_all_reminders(current_user_id: str = Depends(get_current_user)):
     try:
         response = supabase_admin.table("reminders").select("*, memories(raw_text)").eq("user_id", current_user_id).order("due_datetime", desc=False).execute()
-        return response.data
+        reminders = response.data or []
+        for r in reminders:
+            if r.get("recurrence_rule"):
+                try:
+                    raw_rule = r["recurrence_rule"]
+                    if "|" in raw_rule:
+                        cron_rule, tz_offset = raw_rule.split("|", 1)
+                    else:
+                        cron_rule = raw_rule
+                        tz_offset = "+00:00"
+                    
+                    user_tz = timezone.utc
+                    try:
+                        sign = -1 if tz_offset.startswith("-") else 1
+                        parts = tz_offset.strip("+-").split(":")
+                        user_tz = timezone(timedelta(hours=int(parts[0]) * sign, minutes=int(parts[1]) * sign))
+                    except:
+                        pass
+                        
+                    current_due_utc = datetime.fromisoformat(r["due_datetime"].replace("Z", "+00:00"))
+                    current_due_local = current_due_utc.astimezone(user_tz)
+                    
+                    cron = croniter(cron_rule, current_due_local)
+                    next_local_dt = cron.get_next(datetime)
+                    next_utc_dt = next_local_dt.astimezone(timezone.utc)
+                    r["next_due_datetime"] = next_utc_dt.isoformat()
+                except Exception as e:
+                    r["next_due_datetime"] = None
+                    
+        return reminders
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
 
