@@ -1544,8 +1544,9 @@ async def toggle_star_memory(memory_id: str, request: StarMemoryRequest, current
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
 
 @app.get("/api/reminders")
-async def get_all_reminders(current_user_id: str = Depends(get_current_user)):
+async def get_all_reminders(request: Request, current_user_id: str = Depends(get_current_user)):
     try:
+        fallback_tz = request.headers.get("x-timezone-offset", "+00:00")
         response = supabase_admin.table("reminders").select("*, memories(raw_text)").eq("user_id", current_user_id).order("due_datetime", desc=False).execute()
         reminders = response.data or []
         for r in reminders:
@@ -1556,7 +1557,7 @@ async def get_all_reminders(current_user_id: str = Depends(get_current_user)):
                         cron_rule, tz_offset = raw_rule.split("|", 1)
                     else:
                         cron_rule = raw_rule
-                        tz_offset = "+00:00"
+                        tz_offset = fallback_tz
                     
                     user_tz = timezone.utc
                     try:
