@@ -2012,6 +2012,96 @@ async def add_manual_transaction(request: ManualTransactionRequest, current_user
         return {"status": "success", "transaction": res.data[0] if res.data else None}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+class FeatureNotificationRequest(BaseModel):
+    feature_id: str
+    feature_name: str
+    target_screen: str
+    channel_id: str
+    description: str
+    usage: str
+
+@app.post("/api/admin/send-feature-notification")
+async def send_feature_notification(req: FeatureNotificationRequest, current_user_id: str = Depends(get_current_user)):
+    # Check if user is an admin
+    role_res = supabase_admin.table("user_roles").select("role").eq("user_id", current_user_id).execute()
+    if not role_res.data or role_res.data[0].get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden: Admin access required.")
+
+    # 1. Generate notification via Groq
+    system_prompt = f"""
+    Generate an engaging, short push notification title and body to notify users about our app's {req.feature_name} feature.
+    Here is what it does: {req.description}
+    Here is how to use it: {req.usage}
+
+    Ensure the notification body provides a brief overview so the user knows how to utilize it right away.
+    Return ONLY a JSON object with 'title' and 'body' keys.
+    """
+    
+    try:
+        completion = await groq_client.chat.completions.create(
+            messages=[{"role": "system", "content": system_prompt}],
+            model="openai/gpt-oss-120b",
+            temperature=0.7,
+            response_format={"type": "json_object"}
+        )
+        data = json.loads(completion.choices[0].message.content.strip())
+        notif_title = data.get("title", f"Try {req.feature_name}!")
+        notif_body = data.get("body", req.description)
+    except Exception as e:
+        print(f"Feature Notification LLM Error: {e}")
+        notif_title = f"Try {req.feature_name}!"
+        notif_body = req.description
+        
+    # Save to the database before sending
+    try:
+        supabase_admin.table("admin_notifications_log").insert({
+            "feature_id": req.feature_id,
+            "category": req.channel_id,
+            "title": notif_title,
+            "body": notif_body,
+            "sent_by": current_user_id
+        }).execute()
+    except Exception as e:
+        print(f"Warning: Failed to log notification to DB: {e}")
+        # Not throwing an error here so the notification can still go out if the table doesn't exist yet.
+
+    # 2. Get active tokens
+    tokens_res = supabase_admin.table("fcm_tokens").select("token").execute()
+    tokens_data = tokens_res.data or []
+    tokens = [t["token"] for t in tokens_data if t.get("token")]
+
+    if not tokens:
+        return {"status": "success", "sent_count": 0, "message": "No active devices found."}
+
+    # 3. Send via Firebase Admin SDK
+    sent_count = 0
+    try:
+        # Multicast can send to up to 500 tokens at a time
+        for i in range(0, len(tokens), 500):
+            batch = tokens[i:i + 500]
+            message = messaging.MulticastMessage(
+                notification=messaging.Notification(
+                    title=notif_title,
+                    body=notif_body
+                ),
+                data={
+                    "screen": req.target_screen
+                },
+                android=messaging.AndroidConfig(
+                    notification=messaging.AndroidNotification(
+                        channel_id=req.channel_id
+                    )
+                ),
+                tokens=batch
+            )
+            response = messaging.send_each_for_multicast(message)
+            sent_count += response.success_count
+            
+    except Exception as e:
+        print(f"Failed to send feature notification: {e}")
+        raise HTTPException(status_code=500, detail="Failed to dispatch notifications via FCM.")
+        
+    return {"status": "success", "sent_count": sent_count, "title": notif_title, "body": notif_body}
 
 if __name__ == "__main__":
     import uvicorn
