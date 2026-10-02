@@ -2065,7 +2065,7 @@ class DispatchNotificationRequest(BaseModel):
     channel_id: str
     title: str
     body: str
-    scheduled_for: Optional[str] = None
+    scheduled_for: str | None = None
 
 @app.post("/api/admin/generate-feature-notification")
 async def generate_feature_notification(req: FeatureNotificationRequest, current_user_id: str = Depends(get_current_user)):
