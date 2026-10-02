@@ -1089,7 +1089,46 @@ async def check_and_send_reminders(authorization: str = Header(None)):
                 except Exception as push_err:
                     print(f"Failed to process push notifications for user {user_id}: {push_err}")
 
-        return {"status": "success", "notifications_sent": sent_count}
+        # --- ADMIN NOTIFICATIONS ---
+        admin_sent_count = 0
+        try:
+            admin_resp = supabase_admin.table("admin_notifications_log").select("*").eq("status", "pending").lte("scheduled_for", now_utc.isoformat()).execute()
+            if admin_resp.data:
+                tokens_res = supabase_admin.table("fcm_tokens").select("token").execute()
+                tokens = [t["token"] for t in (tokens_res.data or []) if t.get("token")]
+                
+                if tokens:
+                    for notif in admin_resp.data:
+                        # Multicast can send to up to 500 tokens at a time
+                        success_count = 0
+                        for i in range(0, len(tokens), 500):
+                            batch = tokens[i:i + 500]
+                            message = messaging.MulticastMessage(
+                                notification=messaging.Notification(
+                                    title=notif["title"],
+                                    body=notif["body"]
+                                ),
+                                data={
+                                    "screen": notif.get("target_screen", "notes")
+                                },
+                                android=messaging.AndroidConfig(
+                                    notification=messaging.AndroidNotification(
+                                        channel_id=notif.get("category", "channel_features")
+                                    )
+                                ),
+                                tokens=batch
+                            )
+                            response_fcm = messaging.send_each_for_multicast(message)
+                            success_count += response_fcm.success_count
+                        
+                        # Update status to sent
+                        supabase_admin.table("admin_notifications_log").update({"status": "sent"}).eq("id", notif["id"]).execute()
+                        admin_sent_count += 1
+                        print(f"Sent scheduled admin notification {notif['id']} to {success_count} devices.")
+        except Exception as admin_err:
+            print(f"Failed to process scheduled admin notifications: {admin_err}")
+
+        return {"status": "success", "notifications_sent": sent_count, "admin_notifications_sent": admin_sent_count}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Cron Engine Error: {str(e)}")
@@ -2026,6 +2065,7 @@ class DispatchNotificationRequest(BaseModel):
     channel_id: str
     title: str
     body: str
+    scheduled_for: Optional[str] = None
 
 @app.post("/api/admin/generate-feature-notification")
 async def generate_feature_notification(req: FeatureNotificationRequest, current_user_id: str = Depends(get_current_user)):
@@ -2068,56 +2108,24 @@ async def dispatch_feature_notification(req: DispatchNotificationRequest, curren
     if not role_res.data or role_res.data[0].get("role") != "admin":
         raise HTTPException(status_code=403, detail="Forbidden: Admin access required.")
 
-    # Save to the database before sending
+    scheduled_time = req.scheduled_for if req.scheduled_for else datetime.now(timezone.utc).isoformat()
+
+    # Save to the database as pending
     try:
         supabase_admin.table("admin_notifications_log").insert({
             "feature_id": req.feature_id,
             "category": req.channel_id,
             "title": req.title,
             "body": req.body,
-            "sent_by": current_user_id
+            "sent_by": current_user_id,
+            "status": "pending",
+            "scheduled_for": scheduled_time,
+            "target_screen": req.target_screen
         }).execute()
+        return {"status": "success", "message": "Notification scheduled successfully.", "sent_count": 0}
     except Exception as e:
         print(f"Warning: Failed to log notification to DB: {e}")
-        # Not throwing an error here so the notification can still go out if the table doesn't exist yet.
-
-    # 2. Get active tokens
-    tokens_res = supabase_admin.table("fcm_tokens").select("token").execute()
-    tokens_data = tokens_res.data or []
-    tokens = [t["token"] for t in tokens_data if t.get("token")]
-
-    if not tokens:
-        return {"status": "success", "sent_count": 0, "message": "No active devices found."}
-
-    # 3. Send via Firebase Admin SDK
-    sent_count = 0
-    try:
-        # Multicast can send to up to 500 tokens at a time
-        for i in range(0, len(tokens), 500):
-            batch = tokens[i:i + 500]
-            message = messaging.MulticastMessage(
-                notification=messaging.Notification(
-                    title=req.title,
-                    body=req.body
-                ),
-                data={
-                    "screen": req.target_screen
-                },
-                android=messaging.AndroidConfig(
-                    notification=messaging.AndroidNotification(
-                        channel_id=req.channel_id
-                    )
-                ),
-                tokens=batch
-            )
-            response = messaging.send_each_for_multicast(message)
-            sent_count += response.success_count
-            
-    except Exception as e:
-        print(f"Failed to send feature notification: {e}")
-        raise HTTPException(status_code=500, detail="Failed to dispatch notifications via FCM.")
-        
-    return {"status": "success", "sent_count": sent_count, "title": req.title, "body": req.body}
+        raise HTTPException(status_code=500, detail="Failed to schedule notification. Please ensure admin_notifications_log table has 'status', 'scheduled_for', and 'target_screen' columns.")
 
 if __name__ == "__main__":
     import uvicorn
