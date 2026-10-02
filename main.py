@@ -2020,8 +2020,15 @@ class FeatureNotificationRequest(BaseModel):
     description: str
     usage: str
 
-@app.post("/api/admin/send-feature-notification")
-async def send_feature_notification(req: FeatureNotificationRequest, current_user_id: str = Depends(get_current_user)):
+class DispatchNotificationRequest(BaseModel):
+    feature_id: str
+    target_screen: str
+    channel_id: str
+    title: str
+    body: str
+
+@app.post("/api/admin/generate-feature-notification")
+async def generate_feature_notification(req: FeatureNotificationRequest, current_user_id: str = Depends(get_current_user)):
     # Check if user is an admin
     role_res = supabase_admin.table("user_roles").select("role").eq("user_id", current_user_id).execute()
     if not role_res.data or role_res.data[0].get("role") != "admin":
@@ -2052,13 +2059,22 @@ async def send_feature_notification(req: FeatureNotificationRequest, current_use
         notif_title = f"Try {req.feature_name}!"
         notif_body = req.description
         
+    return {"status": "success", "title": notif_title, "body": notif_body}
+
+@app.post("/api/admin/dispatch-feature-notification")
+async def dispatch_feature_notification(req: DispatchNotificationRequest, current_user_id: str = Depends(get_current_user)):
+    # Check if user is an admin
+    role_res = supabase_admin.table("user_roles").select("role").eq("user_id", current_user_id).execute()
+    if not role_res.data or role_res.data[0].get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden: Admin access required.")
+
     # Save to the database before sending
     try:
         supabase_admin.table("admin_notifications_log").insert({
             "feature_id": req.feature_id,
             "category": req.channel_id,
-            "title": notif_title,
-            "body": notif_body,
+            "title": req.title,
+            "body": req.body,
             "sent_by": current_user_id
         }).execute()
     except Exception as e:
@@ -2081,8 +2097,8 @@ async def send_feature_notification(req: FeatureNotificationRequest, current_use
             batch = tokens[i:i + 500]
             message = messaging.MulticastMessage(
                 notification=messaging.Notification(
-                    title=notif_title,
-                    body=notif_body
+                    title=req.title,
+                    body=req.body
                 ),
                 data={
                     "screen": req.target_screen
@@ -2101,7 +2117,7 @@ async def send_feature_notification(req: FeatureNotificationRequest, current_use
         print(f"Failed to send feature notification: {e}")
         raise HTTPException(status_code=500, detail="Failed to dispatch notifications via FCM.")
         
-    return {"status": "success", "sent_count": sent_count, "title": notif_title, "body": notif_body}
+    return {"status": "success", "sent_count": sent_count, "title": req.title, "body": req.body}
 
 if __name__ == "__main__":
     import uvicorn
