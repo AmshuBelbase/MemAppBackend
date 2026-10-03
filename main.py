@@ -2075,14 +2075,22 @@ async def generate_feature_notification(req: FeatureNotificationRequest, current
         raise HTTPException(status_code=403, detail="Forbidden: Admin access required.")
 
     # 1. Generate notification via Groq
-    system_prompt = f"""
-    Generate an engaging, short push notification title and body to notify users about our app's {req.feature_name} feature.
-    Here is what it does: {req.description}
-    Here is how to use it: {req.usage}
+    if req.feature_id == 'app_update':
+        system_prompt = f"""
+        Generate an engaging, short push notification title and body to notify users that a new app update is available for Katch.
+        Encourage them to update the app to get the latest features, bug fixes, and performance improvements.
+        Make it sound exciting but keep it very brief.
+        Return ONLY a JSON object with 'title' and 'body' keys.
+        """
+    else:
+        system_prompt = f"""
+        Generate an engaging, short push notification title and body to notify users about our app's {req.feature_name} feature.
+        Here is what it does: {req.description}
+        Here is how to use it: {req.usage}
 
-    Ensure the notification body provides a brief overview so the user knows how to utilize it right away.
-    Return ONLY a JSON object with 'title' and 'body' keys.
-    """
+        Ensure the notification body provides a brief overview so the user knows how to utilize it right away.
+        Return ONLY a JSON object with 'title' and 'body' keys.
+        """
     
     try:
         completion = await groq_client.chat.completions.create(
