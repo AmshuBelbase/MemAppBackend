@@ -215,7 +215,7 @@ async def extract_reminders(text: str, memory_id: str, timezone_offset: str = "+
 async def extract_transactions(text: str, memory_id: str = None, user_id: str = None):
     # Fetch available categories to pass to the LLM
     default_categories = [
-        "Housing & Rent", "Raw Groceries & Supermarket", "Food Delivery & Eat Out", "Utilities & Bills", "Transport & Travel", "Clothing & Fashion", "Medical & Healthcare", "Grooming & Fitness", "Entertainment & Leisure", "Subscriptions & Software", "Education & Learning", "Finance & Investments", "Gifts & Donations", "Pets & Animals", "Unspecified & Miscellaneous"
+        "Housing & Rent", "Household Groceries", "Dining, Delivery & Snacks", "Utilities & Bills", "Transport & Travel", "Clothing & Fashion", "Medical & Healthcare", "Grooming & Fitness", "Entertainment & Leisure", "Subscriptions & Software", "Education & Learning", "Finance & Investments", "Gifts & Donations", "Pets & Animals", "Unspecified & Miscellaneous"
     ]
     try:
         cat_res = supabase_admin.table("expense_categories").select("name").eq("user_id", user_id).execute()
@@ -330,7 +330,7 @@ async def extract_transactions(text: str, memory_id: str = None, user_id: str = 
     9. Someone else pays for a group (User included)
     Input: "John paid 1500 for dinner for him, me, and Sarah"
     Output: {{"transactions": [
-      {{"transaction_type": "expense", "amount": 500, "currency": "INR", "description": "My dinner share", "category": "Food Delivery & Eat Out"}},
+      {{"transaction_type": "expense", "amount": 500, "currency": "INR", "description": "My dinner share", "category": "Dining, Delivery & Snacks"}},
       {{"transaction_type": "split", "creditor": "John", "debtor": "Self", "amount": 500, "currency": "INR", "description": "Dinner share"}}
     ]}}
 
@@ -373,7 +373,7 @@ async def extract_transactions(text: str, memory_id: str = None, user_id: str = 
     16. Unequal Splits (Explicitly stated)
     Input: "I paid 1000 for dinner for me and John, but John's share was 700."
     Output: {{"transactions": [
-      {{"transaction_type": "expense", "amount": 300, "currency": "INR", "description": "My dinner share", "category": "Food Delivery & Eat Out"}},
+      {{"transaction_type": "expense", "amount": 300, "currency": "INR", "description": "My dinner share", "category": "Dining, Delivery & Snacks"}},
       {{"transaction_type": "split", "creditor": "Self", "debtor": "John", "amount": 700, "currency": "INR", "description": "Dinner share"}}
     ]}}
 
@@ -440,7 +440,7 @@ async def extract_transactions(text: str, memory_id: str = None, user_id: str = 
 
 async def recategorize_transactions_for_month(user_id: str):
     default_categories = [
-        "Housing & Rent", "Raw Groceries & Supermarket", "Food Delivery & Eat Out", "Utilities & Bills", "Transport & Travel", "Clothing & Fashion", "Medical & Healthcare", "Grooming & Fitness", "Entertainment & Leisure", "Subscriptions & Software", "Education & Learning", "Finance & Investments", "Gifts & Donations", "Pets & Animals", "Unspecified & Miscellaneous"
+        "Housing & Rent", "Household Groceries", "Dining, Delivery & Snacks", "Utilities & Bills", "Transport & Travel", "Clothing & Fashion", "Medical & Healthcare", "Grooming & Fitness", "Entertainment & Leisure", "Subscriptions & Software", "Education & Learning", "Finance & Investments", "Gifts & Donations", "Pets & Animals", "Unspecified & Miscellaneous"
     ]
     try:
         cat_res = supabase_client.table("expense_categories").select("name").eq("user_id", user_id).execute()
