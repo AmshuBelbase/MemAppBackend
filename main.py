@@ -215,8 +215,8 @@ async def extract_reminders(text: str, memory_id: str, timezone_offset: str = "+
 async def extract_transactions(text: str, memory_id: str = None, user_id: str = None):
     # Fetch available categories to pass to the LLM
     default_categories = [
-    "Housing & Rent", "Groceries & Supplies", "Dine Out & Food Delivery", "Utilities & Bills", "Transport & Travel", "Clothing & Fashion", "Medical & Healthcare", "Personal Care & Fitness", "Entertainment & Leisure", "Subscriptions & Software", "Education & Learning", "Finance & Investments", "Gifts & Donations", "Pets & Animals", "Miscellaneous & Others"
-]
+        "Housing & Rent", "Raw Groceries & Supermarket", "Food Delivery & Eat Out", "Utilities & Bills", "Transport & Travel", "Clothing & Fashion", "Medical & Healthcare", "Grooming & Fitness", "Entertainment & Leisure", "Subscriptions & Software", "Education & Learning", "Finance & Investments", "Gifts & Donations", "Pets & Animals", "Unspecified & Miscellaneous"
+    ]
     try:
         cat_res = supabase_admin.table("expense_categories").select("name").eq("user_id", user_id).execute()
         custom_categories = [c["name"] for c in cat_res.data]
@@ -308,7 +308,7 @@ async def extract_transactions(text: str, memory_id: str = None, user_id: str = 
     6. User pays for a group (User included)
     Input: "I bought 3 bags for me, sara and priya for 1200 total"
     Output: {{"transactions": [
-      {{"transaction_type": "expense", "amount": 400, "currency": "INR", "description": "My bag's share", "category": "Online Shopping"}},
+      {{"transaction_type": "expense", "amount": 400, "currency": "INR", "description": "My bag's share", "category": "Clothing & Fashion"}},
       {{"transaction_type": "split", "creditor": "Self", "debtor": "sara", "amount": 400, "currency": "INR", "description": "sara's Bag share"}},
       {{"transaction_type": "split", "creditor": "Self", "debtor": "priya", "amount": 400, "currency": "INR", "description": "priya's Bag share"}}
     ]}}
@@ -316,29 +316,29 @@ async def extract_transactions(text: str, memory_id: str = None, user_id: str = 
     7. Someone else pays for them and the User
     Input: "Bob bought movie tickets for both of us, total 600"
     Output: {{"transactions": [
-      {{"transaction_type": "expense", "amount": 300, "currency": "INR", "description": "My movie ticket", "category": "Entertainment"}},
+      {{"transaction_type": "expense", "amount": 300, "currency": "INR", "description": "My movie ticket", "category": "Entertainment & Leisure"}},
       {{"transaction_type": "split", "creditor": "Bob", "debtor": "Self", "amount": 300, "currency": "INR", "description": "Movie ticket"}}
     ]}}
 
     8. Someone else pays for the User only
     Input: "Alice bought a 200rs book for me"
     Output: {{"transactions": [
-      {{"transaction_type": "expense", "amount": 200, "currency": "INR", "description": "Book", "category": "Others"}},
+      {{"transaction_type": "expense", "amount": 200, "currency": "INR", "description": "Book", "category": "Education & Learning"}},
       {{"transaction_type": "split", "creditor": "Alice", "debtor": "Self", "amount": 200, "currency": "INR", "description": "Book"}}
     ]}}
 
     9. Someone else pays for a group (User included)
     Input: "John paid 1500 for dinner for him, me, and Sarah"
     Output: {{"transactions": [
-      {{"transaction_type": "expense", "amount": 500, "currency": "INR", "description": "My dinner share", "category": "Food & Groceries"}},
+      {{"transaction_type": "expense", "amount": 500, "currency": "INR", "description": "My dinner share", "category": "Food Delivery & Eat Out"}},
       {{"transaction_type": "split", "creditor": "John", "debtor": "Self", "amount": 500, "currency": "INR", "description": "Dinner share"}}
     ]}}
 
     10. Someone else pays for a group (They are excluded, User included)
-    Input: "Dad bought 3 tickets for me, Tom, and Jerry for 900"
+    Input: "Alice bought 3 tickets for me, Tom, and Jerry for 900"
     Output: {{"transactions": [
-      {{"transaction_type": "expense", "amount": 300, "currency": "INR", "description": "My ticket", "category": "Entertainment"}},
-      {{"transaction_type": "split", "creditor": "Dad", "debtor": "Self", "amount": 300, "currency": "INR", "description": "Ticket"}}
+      {{"transaction_type": "expense", "amount": 300, "currency": "INR", "description": "My ticket", "category": "Entertainment & Leisure"}},
+      {{"transaction_type": "split", "creditor": "Alice", "debtor": "Self", "amount": 300, "currency": "INR", "description": "Ticket"}}
     ]}}
 
     11. Personal Income (No debt involved, eg, salary, cashbacks, monetary gifts received)
@@ -373,14 +373,14 @@ async def extract_transactions(text: str, memory_id: str = None, user_id: str = 
     16. Unequal Splits (Explicitly stated)
     Input: "I paid 1000 for dinner for me and John, but John's share was 700."
     Output: {{"transactions": [
-      {{"transaction_type": "expense", "amount": 300, "currency": "INR", "description": "My dinner share", "category": "Food & Groceries"}},
+      {{"transaction_type": "expense", "amount": 300, "currency": "INR", "description": "My dinner share", "category": "Food Delivery & Eat Out"}},
       {{"transaction_type": "split", "creditor": "Self", "debtor": "John", "amount": 700, "currency": "INR", "description": "Dinner share"}}
     ]}}
 
     17. Multi-Payer Scenarios
     Input: "The bill was 1000. I paid 400 and Sarah paid 600. It was for me, Sarah, and Bob."
     Output: {{"transactions": [
-      {{"transaction_type": "expense", "amount": 333.33, "currency": "INR", "description": "My bill share", "category": "Others"}},
+      {{"transaction_type": "expense", "amount": 333.33, "currency": "INR", "description": "My bill share", "category": "Unspecified & Miscellaneous"}},
       {{"transaction_type": "split", "creditor": "Self", "debtor": "Bob", "amount": 66.67, "currency": "INR", "description": "Bob's share to me"}}
     ]}}
     
@@ -439,7 +439,9 @@ async def extract_transactions(text: str, memory_id: str = None, user_id: str = 
         return []
 
 async def recategorize_transactions_for_month(user_id: str):
-    default_categories = ["Food & Groceries", "Clothing & Lifestyle", "Travel", "Entertainment", "Online Shopping", "Others"]
+    default_categories = [
+        "Housing & Rent", "Raw Groceries & Supermarket", "Food Delivery & Eat Out", "Utilities & Bills", "Transport & Travel", "Clothing & Fashion", "Medical & Healthcare", "Grooming & Fitness", "Entertainment & Leisure", "Subscriptions & Software", "Education & Learning", "Finance & Investments", "Gifts & Donations", "Pets & Animals", "Unspecified & Miscellaneous"
+    ]
     try:
         cat_res = supabase_client.table("expense_categories").select("name").eq("user_id", user_id).execute()
         custom_categories = [c["name"] for c in cat_res.data]

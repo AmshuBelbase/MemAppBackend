@@ -15,7 +15,7 @@ groq_client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY"))
 # DEFAULT_CATEGORIES = ["Food & Groceries", "Clothing & Lifestyle", "Travel", "Entertainment", "Online Shopping", "Others"]
 
 DEFAULT_CATEGORIES = [
-    "Housing & Rent", "Groceries & Supplies", "Dine Out & Food Delivery", "Utilities & Bills", "Transport & Travel", "Clothing & Fashion", "Medical & Healthcare", "Personal Care & Fitness", "Entertainment & Leisure", "Subscriptions & Software", "Education & Learning", "Finance & Investments", "Gifts & Donations", "Pets & Animals", "Miscellaneous & Others"
+    "Housing & Rent", "Raw Groceries & Supermarket", "Food Delivery & Eat Out", "Utilities & Bills", "Transport & Travel", "Clothing & Fashion", "Medical & Healthcare", "Grooming & Fitness", "Entertainment & Leisure", "Subscriptions & Software", "Education & Learning", "Finance & Investments", "Gifts & Donations", "Pets & Animals", "Unspecified & Miscellaneous"
 ]
 
 async def recategorize_transaction(txn):
