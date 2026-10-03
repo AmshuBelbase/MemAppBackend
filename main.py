@@ -2027,8 +2027,82 @@ async def send_daily_drops(authorization: str = Header(None)):
                     supabase_admin.table("fcm_tokens").delete().eq("token", token_str).execute()
                 except Exception as e:
                     print(f"Failed to send daily drop to token {token_str}: {e}")
+        # --- WEEKLY FEATURE NOTIFICATIONS ---
+        feature_notifs_sent = 0
+        try:
+            import hashlib
+            import random
+            
+            # Fetch all features dynamically from the database
+            feat_resp = supabase_admin.table("app_features").select("*").execute()
+            feat_dict = {f["id"]: f for f in (feat_resp.data or [])}
+            FEATURES = sorted(feat_dict.keys())
+            num_features = len(FEATURES)
 
-        return {"status": "success", "daily_drops_sent": sent_count}
+            features_to_send_by_id = {}
+            for token_record in users_by_token:
+                token = token_record.get("fcm_token")
+                if not token: continue
+                offset_str = token_record.get("timezone_offset", "+00:00")
+                if not offset_str: offset_str = "+00:00"
+                try:
+                    sign = 1 if offset_str[0] == '+' else -1
+                    parts = offset_str[1:].split(':')
+                    offset = timedelta(hours=sign * int(parts[0]), minutes=sign * int(parts[1] if len(parts) > 1 else 0))
+                    local_time = now_utc + offset
+                    
+                    day_of_week = local_time.weekday()
+                    current_hour = local_time.hour
+                    current_minute_bucket = (local_time.minute // 10) * 10
+                    
+                    # Seed RNG uniquely for this user, for this specific week
+                    week_number = local_time.isocalendar()[1]
+                    year = local_time.year
+                    rng = random.Random(f"{token}_{year}_{week_number}")
+                    
+                    # Dynamically allocate features evenly across 7 days
+                    days = [i % 7 for i in range(num_features)]
+                    rng.shuffle(days)
+                    
+                    for i, feature_id in enumerate(FEATURES):
+                        assigned_day = days[i]
+                        target_hour = rng.randint(9, 20)
+                        target_minute_bucket = rng.randrange(0, 60, 10)
+                        
+                        if assigned_day == day_of_week and current_hour == target_hour and current_minute_bucket == target_minute_bucket:
+                            features_to_send_by_id.setdefault(feature_id, []).append(token)
+                except Exception:
+                    pass
+
+            if features_to_send_by_id:
+                for feature_id, tokens in features_to_send_by_id.items():
+                    if feature_id not in feat_dict: continue
+                    f = feat_dict[feature_id]
+                    prompt = f"Generate an engaging, short push notification title and body to remind users about our app's {f['name']} feature. Here is what it does: {f['description']} Here is how to use it: {f['usage']} Ensure the notification body is exciting and encourages them to try it out. Keep it very brief. Return ONLY a JSON object with 'title' and 'body' keys."
+                    try:
+                        completion = await groq_client.chat.completions.create(
+                            messages=[{"role": "system", "content": prompt}],
+                            model="llama3-8b-8192", temperature=0.7, response_format={"type": "json_object"},
+                        )
+                        ai_response = json.loads(completion.choices[0].message.content)
+                        title = ai_response.get("title", f"Try {f['name']}!")
+                        body = ai_response.get("body", "Tap here to check it out.")
+                        
+                        message = messaging.MulticastMessage(
+                            tokens=tokens,
+                            notification=messaging.Notification(title=title, body=body),
+                            data={"type": "feature", "feature_id": feature_id, "target_screen": f["screen"]},
+                            android=messaging.AndroidConfig(priority="high", notification=messaging.AndroidNotification(channel_id="channel_features"))
+                        )
+                        messaging.send_each_for_multicast(message)
+                        feature_notifs_sent += len(tokens)
+                    except Exception as e:
+                        print(f"Failed to send feature promo for {feature_id}: {e}")
+        except Exception as e:
+            print(f"Error checking feature promos: {e}")
+        # --- END WEEKLY FEATURE NOTIFICATIONS ---
+
+        return {"status": "success", "daily_drops_sent": sent_count, "feature_promos_sent": feature_notifs_sent}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Daily Drops Cron Error: {str(e)}")
