@@ -214,9 +214,11 @@ async def extract_reminders(text: str, memory_id: str, timezone_offset: str = "+
 
 async def extract_transactions(text: str, memory_id: str = None, user_id: str = None):
     # Fetch available categories to pass to the LLM
-    default_categories = ["Food & Groceries", "Clothing & Lifestyle", "Travel", "Entertainment", "Online Shopping", "Others"]
+    default_categories = [
+    "Housing & Rent", "Groceries & Supplies", "Dine Out & Food Delivery", "Utilities & Bills", "Transport & Travel", "Clothing & Fashion", "Medical & Healthcare", "Personal Care & Fitness", "Entertainment & Leisure", "Subscriptions & Software", "Education & Learning", "Finance & Investments", "Gifts & Donations", "Pets & Animals", "Miscellaneous & Others"
+]
     try:
-        cat_res = supabase_client.table("expense_categories").select("name").eq("user_id", user_id).execute()
+        cat_res = supabase_admin.table("expense_categories").select("name").eq("user_id", user_id).execute()
         custom_categories = [c["name"] for c in cat_res.data]
         categories = default_categories + custom_categories
     except:
@@ -257,8 +259,8 @@ async def extract_transactions(text: str, memory_id: str = None, user_id: str = 
     - "currency": Always use 'INR' unless explicitly stated otherwise.
     - "description": A short summary.
     
-    If "transaction_type" is "expense" or "income", add:
-    - "category": Choose from: {', '.join(categories)}.
+    If "transaction_type" is "expense" or "income", add: 
+    - "category": Choose the MOST relevant category from this exact list: {', '.join(categories)}. Do NOT default to 'Others' if a broader category fits. Use 'Others' ONLY as a last resort.
     
     If "transaction_type" is "split", add:
     - "creditor": The ONE person owed money (usually "Self" if someone owes the user, or the other person's name if the user owes them). Format as Title Case.
