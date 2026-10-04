@@ -214,15 +214,21 @@ async def extract_reminders(text: str, memory_id: str, timezone_offset: str = "+
 
 async def extract_transactions(text: str, memory_id: str = None, user_id: str = None):
     # Fetch available categories to pass to the LLM
-    default_categories = [
-        "Housing & Rent", "Household Groceries", "Dining, Delivery & Snacks", "Utilities & Bills", "Transport & Travel", "Clothing & Fashion", "Medical & Healthcare", "Grooming & Fitness", "Entertainment & Leisure", "Subscriptions & Software", "Education & Learning", "Finance & Investments", "Gifts & Donations", "Pets & Animals", "Unspecified & Miscellaneous"
-    ]
     try:
+        default_res = supabase_admin.table("expense_categories").select("name").is_("user_id", "null").execute()
+        default_categories = [c["name"] for c in default_res.data]
+        if not default_categories:
+            default_categories = [
+                "Housing & Rent", "Household Groceries", "Dining, Delivery & Snacks", "Utilities & Bills", "Transport & Travel", "Clothing & Fashion", "Medical & Healthcare", "Grooming & Fitness", "Entertainment & Leisure", "Subscriptions & Software", "Education & Learning", "Finance & Investments", "Gifts & Donations", "Pets & Animals", "Unspecified & Miscellaneous"
+            ]
         cat_res = supabase_admin.table("expense_categories").select("name").eq("user_id", user_id).execute()
         custom_categories = [c["name"] for c in cat_res.data]
         categories = default_categories + custom_categories
-    except:
-        categories = default_categories
+    except Exception as e:
+        print(f"Error fetching categories: {e}")
+        categories = [
+            "Housing & Rent", "Household Groceries", "Dining, Delivery & Snacks", "Utilities & Bills", "Transport & Travel", "Clothing & Fashion", "Medical & Healthcare", "Grooming & Fitness", "Entertainment & Leisure", "Subscriptions & Software", "Education & Learning", "Finance & Investments", "Gifts & Donations", "Pets & Animals", "Unspecified & Miscellaneous"
+        ]
 
     known_people_list = []
     try:
@@ -419,6 +425,19 @@ async def extract_transactions(text: str, memory_id: str = None, user_id: str = 
                 # Both 'expense' and 'income' don't use creditor/debtor
                 t["creditor"] = None
                 t["debtor"] = None
+                
+                # Check and fix category fuzzy match to prevent LLM hallucinations
+                cat = t.get("category", "")
+                if cat and cat not in categories:
+                    matched = False
+                    for c in categories:
+                        if c.lower() in cat.lower() or cat.lower() in c.lower():
+                            t["category"] = c
+                            matched = True
+                            break
+                    if not matched:
+                        fallback = "Unspecified & Miscellaneous" if "Unspecified & Miscellaneous" in categories else (categories[-1] if categories else "Others")
+                        t["category"] = fallback
             
             if memory_id:
                 t["memory_id"] = memory_id
@@ -439,15 +458,22 @@ async def extract_transactions(text: str, memory_id: str = None, user_id: str = 
         return []
 
 async def recategorize_transactions_for_month(user_id: str):
-    default_categories = [
-        "Housing & Rent", "Household Groceries", "Dining, Delivery & Snacks", "Utilities & Bills", "Transport & Travel", "Clothing & Fashion", "Medical & Healthcare", "Grooming & Fitness", "Entertainment & Leisure", "Subscriptions & Software", "Education & Learning", "Finance & Investments", "Gifts & Donations", "Pets & Animals", "Unspecified & Miscellaneous"
-    ]
     try:
+        default_res = supabase_admin.table("expense_categories").select("name").is_("user_id", "null").execute()
+        default_categories = [c["name"] for c in default_res.data]
+        if not default_categories:
+            print("!!!!! Default categories not found, using hardcoded list !!!!!")
+            default_categories = [
+                "Housing & Rent", "Household Groceries", "Dining, Delivery & Snacks", "Utilities & Bills", "Transport & Travel", "Clothing & Fashion", "Medical & Healthcare", "Grooming & Fitness", "Entertainment & Leisure", "Subscriptions & Software", "Education & Learning", "Finance & Investments", "Gifts & Donations", "Pets & Animals", "Unspecified & Miscellaneous"
+            ]
         cat_res = supabase_client.table("expense_categories").select("name").eq("user_id", user_id).execute()
         custom_categories = [c["name"] for c in cat_res.data]
         categories = default_categories + custom_categories
-    except:
-        categories = default_categories
+    except Exception as e:
+        print(f"Error fetching categories for recategorization: {e}")
+        categories = [
+            "Housing & Rent", "Household Groceries", "Dining, Delivery & Snacks", "Utilities & Bills", "Transport & Travel", "Clothing & Fashion", "Medical & Healthcare", "Grooming & Fitness", "Entertainment & Leisure", "Subscriptions & Software", "Education & Learning", "Finance & Investments", "Gifts & Donations", "Pets & Animals", "Unspecified & Miscellaneous"
+        ]
         
     now = datetime.now(timezone.utc)
     first_day = datetime(now.year, now.month, 1, tzinfo=timezone.utc).isoformat()
@@ -575,14 +601,46 @@ class CategoryRequest(BaseModel):
 @app.get("/api/expense_categories")
 async def get_expense_categories(current_user_id: str = Depends(get_current_user)):
     try:
-        default_names = ["Food & Groceries", "Clothing & Lifestyle", "Travel", "Entertainment", "Online Shopping", "Others"]
-        default_categories = [{"id": None, "name": name, "user_id": None} for name in default_names]
-        
+        default_res = supabase_admin.table("expense_categories").select("id, name").is_("user_id", "null").order("name").execute()
+        default_categories = [{"id": c["id"], "name": c["name"], "user_id": None} for c in default_res.data]
+        if not default_categories:
+            default_names = ["Housing & Rent", "Household Groceries", "Dining, Delivery & Snacks", "Utilities & Bills", "Transport & Travel", "Clothing & Fashion", "Medical & Healthcare", "Grooming & Fitness", "Entertainment & Leisure", "Subscriptions & Software", "Education & Learning", "Finance & Investments", "Gifts & Donations", "Pets & Animals", "Unspecified & Miscellaneous"]
+            default_categories = [{"id": None, "name": name, "user_id": None} for name in default_names]
+            
         response = supabase_client.table("expense_categories").select("*").eq("user_id", current_user_id).order("name").execute()
         
         # Merge default and user-specific categories
         all_categories = default_categories + response.data
         return {"status": "success", "categories": all_categories}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/admin/expense_categories")
+async def admin_add_expense_category(req: CategoryRequest, current_user_id: str = Depends(get_current_user)):
+    try:
+        user_resp = supabase_admin.auth.admin.get_user_by_id(current_user_id)
+        if not user_resp.user.user_metadata.get("is_admin", False):
+            raise HTTPException(status_code=403, detail="Not authorized")
+            
+        if len(req.name) > 30:
+            raise HTTPException(status_code=400, detail="Category name must be 30 characters or less.")
+            
+        response = supabase_admin.table("expense_categories").insert({"name": req.name, "user_id": None}).execute()
+        return {"status": "success", "category": response.data[0]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/admin/expense_categories/{category_id}")
+async def admin_delete_expense_category(category_id: int, current_user_id: str = Depends(get_current_user)):
+    try:
+        user_resp = supabase_admin.auth.admin.get_user_by_id(current_user_id)
+        if not user_resp.user.user_metadata.get("is_admin", False):
+            raise HTTPException(status_code=403, detail="Not authorized")
+            
+        supabase_admin.table("expense_categories").delete().eq("id", category_id).is_("user_id", "null").execute()
+        return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

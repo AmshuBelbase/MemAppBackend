@@ -12,25 +12,27 @@ supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 supabase: Client = create_client(supabase_url, supabase_key)
 groq_client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY"))
 
-# DEFAULT_CATEGORIES = ["Food & Groceries", "Clothing & Lifestyle", "Travel", "Entertainment", "Online Shopping", "Others"]
-
-DEFAULT_CATEGORIES = [
-    "Housing & Rent", "Household Groceries", "Dining, Delivery & Snacks", "Utilities & Bills", "Transport & Travel", "Clothing & Fashion", "Medical & Healthcare", "Grooming & Fitness", "Entertainment & Leisure", "Subscriptions & Software", "Education & Learning", "Finance & Investments", "Gifts & Donations", "Pets & Animals", "Unspecified & Miscellaneous"
-]
-
 async def recategorize_transaction(txn):
     user_id = txn["user_id"]
     description = txn["description"]
     amount = txn["amount"]
     old_category = txn["category"]
     
-    # Fetch user's custom categories
     try:
+        default_res = supabase.table("expense_categories").select("name").is_("user_id", "null").execute()
+        default_categories = [c["name"] for c in default_res.data]
+        if not default_categories:
+            default_categories = [
+                "Housing & Rent", "Household Groceries", "Dining, Delivery & Snacks", "Utilities & Bills", "Transport & Travel", "Clothing & Fashion", "Medical & Healthcare", "Grooming & Fitness", "Entertainment & Leisure", "Subscriptions & Software", "Education & Learning", "Finance & Investments", "Gifts & Donations", "Pets & Animals", "Unspecified & Miscellaneous"
+            ]
+            
         cat_res = supabase.table("expense_categories").select("name").eq("user_id", user_id).execute()
         custom_categories = [c["name"] for c in cat_res.data]
-        categories = DEFAULT_CATEGORIES + custom_categories
+        categories = default_categories + custom_categories
     except:
-        categories = DEFAULT_CATEGORIES
+        categories = [
+            "Housing & Rent", "Household Groceries", "Dining, Delivery & Snacks", "Utilities & Bills", "Transport & Travel", "Clothing & Fashion", "Medical & Healthcare", "Grooming & Fitness", "Entertainment & Leisure", "Subscriptions & Software", "Education & Learning", "Finance & Investments", "Gifts & Donations", "Pets & Animals", "Unspecified & Miscellaneous"
+        ]
 
     prompt = f"""
     You are a precise financial categorization AI.
@@ -43,7 +45,7 @@ async def recategorize_transaction(txn):
     
     Rules:
     - Choose the MOST relevant category from this exact list.
-    - Do NOT default to 'Miscellaneous & Others' if a broader category fits. Use 'Miscellaneous & Others' ONLY as a last resort.
+    - Do NOT default to 'Unspecified & Miscellaneous' if a broader category fits. Use 'Unspecified & Miscellaneous' ONLY as a last resort.
     
     Return ONLY a JSON object with a single key "category".
     """
@@ -56,7 +58,7 @@ async def recategorize_transaction(txn):
             response_format={"type": "json_object"},
         )
         ai_response = json.loads(completion.choices[0].message.content)
-        new_category = ai_response.get("category", "Miscellaneous & Others")
+        new_category = ai_response.get("category", "Unspecified & Miscellaneous")
         
         # Verify the new category is somewhat valid (fallback just in case)
         if new_category not in categories:
@@ -68,7 +70,7 @@ async def recategorize_transaction(txn):
                     matched = True
                     break
             if not matched:
-                new_category = "Miscellaneous & Others"
+                new_category = "Unspecified & Miscellaneous" if "Unspecified & Miscellaneous" in categories else (categories[-1] if categories else "Others")
 
         # Update if changed
         if new_category != old_category:
