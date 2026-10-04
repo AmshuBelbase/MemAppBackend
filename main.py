@@ -632,6 +632,28 @@ async def admin_add_expense_category(req: CategoryRequest, current_user_id: str 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.put("/api/admin/expense_categories/{category_id}")
+async def admin_edit_expense_category(category_id: int, req: CategoryRequest, current_user_id: str = Depends(get_current_user)):
+    try:
+        user_resp = supabase_admin.auth.admin.get_user_by_id(current_user_id)
+        if not user_resp.user.user_metadata.get("is_admin", False):
+            raise HTTPException(status_code=403, detail="Not authorized")
+            
+        if len(req.name) > 30:
+            raise HTTPException(status_code=400, detail="Category name must be 30 characters or less.")
+            
+        # Update global category
+        response = supabase_admin.table("expense_categories").update({"name": req.name}).eq("id", category_id).is_("user_id", "null").execute()
+        
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Category not found or not a default category")
+            
+        return {"status": "success", "category": response.data[0]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.delete("/api/admin/expense_categories/{category_id}")
 async def admin_delete_expense_category(category_id: int, current_user_id: str = Depends(get_current_user)):
     try:
